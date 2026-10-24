@@ -1,0 +1,6 @@
+/target
+/Cargo.lock
+mirsad.db*
+*.db-journal
+matrix-store/
+.env

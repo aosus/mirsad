@@ -1,0 +1,19 @@
+services:
+  mirsad:
+    build: .
+    image: mirsad:latest
+    container_name: mirsad
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Edit these on the host; no rebuild needed to retune.
+      - ./config/config.toml:/app/config/config.toml:ro
+      - ./config/decision-questions.json:/app/config/decision-questions.json:ro
+      # Persistent state (SQLite + Matrix sync store) survives recreation.
+      - mirsad-data:/data
+    environment:
+      RUST_LOG: ${RUST_LOG:-mirsad=info}
+
+volumes:
+  mirsad-data:

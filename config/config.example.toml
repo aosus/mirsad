@@ -1,0 +1,64 @@
+# Mirsad example configuration. Copy to config.toml and edit.
+# Secrets are NEVER stored here — use environment variables:
+#   MATRIX_PASSWORD, OPENROUTER_API_KEY (required at runtime)
+#   MATRIX_ACCESS_TOKEN is reserved for a future release (v1 uses password login).
+
+[matrix]
+homeserver = "https://matrix.aosus.org"
+user_id = "@mirsad:aosus.org"
+device_name = "mirsad"
+# Only moderate these rooms. Empty = all joined rooms.
+monitored_rooms = []
+# Private room for enforcement notices and classifier errors (optional).
+# mod_room = "!opsroom:aosus.org"
+autojoin = true
+
+[decider]
+# OpenRouter Decisions API (same contract as the Perplexity Decisions API).
+base_url = "https://openrouter.ai/api/alpha/decisions"
+# Switch models with one line. Flash is cheaper; v1.2 is more accurate.
+# model = "perplexity/pplx-decider-v1.2"
+model = "perplexity/pplx-decider-v1.2"
+timeout_secs = 30
+max_chars = 4000
+# Optional rankings headers.
+# http_referer = "https://aosus.org"
+app_title = "mirsad"
+
+[policy]
+questions_file = "config/decision-questions.json"
+spam_question = "spam"
+language_question = "language_violation"
+category_question = "spam_category"
+# Scores are 0..1 probabilities from the decision model.
+spam_threshold = 0.9
+language_threshold = 0.9
+# Observation-only rollout: true = never redact/ban, only log + notify.
+dry_run = true
+# Action for language violations: "warn" | "delete" | "ignore".
+language_action = "warn"
+
+[trust]
+min_messages = 10
+min_days = 3
+inactivity_days = 90
+filler_min_chars = 5
+
+[exclusions]
+# Users never auto-scanned or auto-punished (admins, bots, bridges).
+# Supports a trailing * wildcard, e.g. "@admin:*".
+user_ids = [
+  "@admin:aosus.org",
+]
+
+[rose]
+enabled = false
+# bot_user_id = "@rose:aosus.org"
+warn_template = "/warn {user} {reason}"
+
+[report]
+max_reports_per_5min = 5
+
+[storage]
+sqlite_path = "data/mirsad.db"
+matrix_store_path = "data/matrix-store"

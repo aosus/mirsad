@@ -1,0 +1,31 @@
+{
+  "questions": {
+    "spam": {
+      "type": "noul",
+      "instructions": "Does this chat message constitute unsolicited promotional spam for the Aosus community?",
+      "criteria": {
+        "true": "Unsolicited commercial promotion: investment/IPO solicitation, guaranteed returns, crypto schemes, fake or vague job offers, work-from-home earning claims, referral/rewards schemes, money-making apps, or any advertisement the recipient did not ask for. Obfuscated spam (extra symbols, mixed scripts, QR/link lures) still counts.",
+        "false": "Legitimate discussion, including talking ABOUT investments or jobs, criticizing or quoting spam to warn others, technical talk with English terms/code/URLs, or messages with no promotional intent."
+      }
+    },
+    "language_violation": {
+      "type": "noul",
+      "instructions": "Is this message primarily written in a language other than Arabic?",
+      "criteria": {
+        "true": "The message body is mostly non-Arabic prose (e.g. a full English/Chinese advertisement or conversation).",
+        "false": "Arabic discussion that happens to contain English technical terms, code, URLs, product names, error messages, or short quoted foreign material."
+      }
+    },
+    "spam_category": {
+      "type": "choice",
+      "instructions": "What is the primary category of this message?",
+      "criteria": {
+        "investment": "Investment or financial solicitation: IPOs, trading, guaranteed returns, crypto.",
+        "jobs": "Employment or income opportunity: job ads, hiring, work-from-home offers.",
+        "referral": "Referral or rewards scheme: invite links, bonuses, money-making apps.",
+        "other_ads": "Other unsolicited advertisement not covered above.",
+        "legitimate": "Not promotional spam: normal discussion, questions, criticism of spam."
+      }
+    }
+  }
+}
