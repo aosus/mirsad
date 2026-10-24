@@ -27,9 +27,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: dtolnay/rust-action-cache@v2
-        with:
-          cache-directories: target
+      - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets -- -D warnings
 
   test:
@@ -38,9 +36,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: dtolnay/rust-action-cache@v2
-        with:
-          cache-directories: target
+      - uses: Swatinem/rust-cache@v2
       - name: Validate example configs parse
         run: |
           mkdir -p /tmp/mirsad-ci-check/config
@@ -66,9 +62,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: dtolnay/rust-action-cache@v2
-        with:
-          cache-directories: target
+      - uses: Swatinem/rust-cache@v2
       - run: cargo build --release
 
   docker:
