@@ -40,7 +40,10 @@ pub fn build_warn_command(template: &str, matrix_user_id: &str, reason: &str) ->
 
 /// Reason string attached to bans / warn commands.
 pub fn spam_reason(category: &str, spam_score: f64) -> String {
-    format!("spam ({category}, {:.0}%) — automated removal by Mirsad", spam_score * 100.0)
+    format!(
+        "spam ({category}, {:.0}%) — automated removal by Mirsad",
+        spam_score * 100.0
+    )
 }
 
 #[cfg(test)]

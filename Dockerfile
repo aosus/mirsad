@@ -6,7 +6,7 @@ COPY Cargo.toml Cargo.lock* ./
 RUN mkdir -p src && echo 'fn main() {}' > src/main.rs && \
     cargo build --release 2>/dev/null || true
 COPY . .
-RUN cargo build --release --locked=false
+RUN cargo build --release --locked
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \

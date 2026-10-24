@@ -44,7 +44,10 @@ impl QuestionDef {
                     .and_then(|c| c.as_object())
                     .map(|o| o.len())
                     .unwrap_or(0);
-                anyhow::ensure!((1..=255).contains(&n), "choice question '{name}' needs 1-255 options");
+                anyhow::ensure!(
+                    (1..=255).contains(&n),
+                    "choice question '{name}' needs 1-255 options"
+                );
             }
             "score" => {
                 let n = self
@@ -53,7 +56,10 @@ impl QuestionDef {
                     .and_then(|c| c.as_array())
                     .map(|a| a.len())
                     .unwrap_or(0);
-                anyhow::ensure!((2..=10).contains(&n), "score question '{name}' needs 2-10 levels");
+                anyhow::ensure!(
+                    (2..=10).contains(&n),
+                    "score question '{name}' needs 2-10 levels"
+                );
             }
             _ => unreachable!(),
         }

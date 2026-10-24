@@ -20,8 +20,8 @@ fn example_configs_parse_and_agree() {
     let questions = policy["questions"].as_object().expect("questions object");
 
     // Configured question ids must exist in the policy file.
-    for q in ["spam", "language_violation", "spam_category"] {
-        let cfg_q = cfg["policy"][q].as_str().unwrap();
+    for key in ["spam_question", "language_question", "category_question"] {
+        let cfg_q = cfg["policy"][key].as_str().unwrap();
         assert!(questions.contains_key(cfg_q), "missing question {cfg_q}");
     }
     // Types must be what the bot expects.

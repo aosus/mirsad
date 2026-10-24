@@ -11,32 +11,34 @@
 use std::{
     collections::HashMap,
     sync::{
-        Arc,
         atomic::{AtomicBool, Ordering},
+        Arc,
     },
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
 use matrix_sdk::{
-    Client, Room, RoomState,
     config::SyncSettings,
     event_handler::Ctx,
     ruma::{
-        OwnedEventId, OwnedUserId,
         events::room::{
             member::{MembershipState, OriginalSyncRoomMemberEvent, StrippedRoomMemberEvent},
-            message::{MessageType, OriginalSyncRoomMessageEvent, Relation, RoomMessageEventContent},
+            message::{
+                MessageType, OriginalSyncRoomMessageEvent, Relation, RoomMessageEventContent,
+            },
         },
+        OwnedEventId, OwnedUserId,
     },
+    Client, Room, RoomState,
 };
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use crate::{
     config::{AppConfig, Secrets},
-    decider::{Classification, DeciderClient, message_state},
-    enforcement::{Action, EnforcementInput, decide},
+    decider::{message_state, Classification, DeciderClient},
+    enforcement::{decide, Action, EnforcementInput},
     report::diagnostic_message,
     rose::{build_warn_command, is_bridged_telegram, spam_reason},
     store::Store,
@@ -83,7 +85,10 @@ impl AppState {
                 };
                 (trust.to_string(), prot.to_string())
             }
-            Err(_) => ("unknown".to_string(), "protected (lookup failed)".to_string()),
+            Err(_) => (
+                "unknown".to_string(),
+                "protected (lookup failed)".to_string(),
+            ),
         }
     }
 }
@@ -131,10 +136,12 @@ pub async fn run(client: Client, state: Arc<AppState>) -> Result<()> {
     client.add_event_handler(handle_member);
     {
         let s = state.clone();
-        client.add_event_handler(move |ev: OriginalSyncRoomMessageEvent, room: Room, client: Client| {
-            let s = s.clone();
-            async move { on_message(ev, room, client, s).await }
-        });
+        client.add_event_handler(
+            move |ev: OriginalSyncRoomMessageEvent, room: Room, client: Client| {
+                let s = s.clone();
+                async move { on_message(ev, room, client, s).await }
+            },
+        );
     }
     // Share state with member handler via context.
     client.add_event_handler_context(state.clone());
@@ -194,11 +201,7 @@ fn note_first_sighting(state: &AppState, user_id: &str) {
     // Outside the window: stays protected-unknown until a join event verifies it.
 }
 
-async fn handle_invite(
-    ev: StrippedRoomMemberEvent,
-    client: Client,
-    room: Room,
-) {
+async fn handle_invite(ev: StrippedRoomMemberEvent, client: Client, room: Room) {
     if client.user_id().is_none_or(|u| *u != ev.state_key) {
         return;
     }
@@ -285,12 +288,13 @@ async fn on_message(
 
     match classify_message(&state, &body, &sender, &room_id).await {
         Ok(cls) => {
-            let row = state.store.get_user(&sender).unwrap_or_else(|_| {
-                crate::store::UserRow {
+            let row = state
+                .store
+                .get_user(&sender)
+                .unwrap_or_else(|_| crate::store::UserRow {
                     user_id: sender.clone(),
                     ..Default::default()
-                }
-            });
+                });
             let excluded = state.config.is_excluded(&sender);
             let decision = decide(EnforcementInput {
                 cls: &cls,
@@ -314,13 +318,26 @@ async fn on_message(
                     state.config.trust.min_days,
                 );
             }
-            apply_enforcement(&state, &room, &client, &ev.event_id.to_string(), &sender, &cls, &decision)
-                .await;
+            apply_enforcement(
+                &state,
+                &room,
+                &client,
+                ev.event_id.as_str(),
+                &sender,
+                &cls,
+                &decision,
+            )
+            .await;
         }
         Err(e) => {
             // Never punish on classifier failure.
             warn!("classification failed for {}: {e:#}", ev.event_id);
-            notify_mods(&state, &client, &format!("Classifier error in {room_id}: {e:#}")).await;
+            notify_mods(
+                &state,
+                &client,
+                &format!("Classifier error in {room_id}: {e:#}"),
+            )
+            .await;
         }
     }
 }
@@ -366,9 +383,11 @@ async fn handle_report(
     // Rate limit.
     if !check_rate_limit(&state, &reporter).await {
         let _ = room
-            .send(matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(
-                "Rate limit: please wait a few minutes before reporting again.",
-            ))
+            .send(
+                matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(
+                    "Rate limit: please wait a few minutes before reporting again.",
+                ),
+            )
             .await;
         return;
     }
@@ -388,9 +407,13 @@ async fn handle_report(
     let (target_body, target_author) = match fetch_event_text(&room, &target_id).await {
         Ok(v) => v,
         Err(e) => {
-            let _ = room.send(matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(
-                format!("Could not retrieve the reported message ({target_id}): {e:#}"),
-            )).await;
+            let _ = room
+                .send(
+                    matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(
+                        format!("Could not retrieve the reported message ({target_id}): {e:#}"),
+                    ),
+                )
+                .await;
             return;
         }
     };
@@ -406,12 +429,13 @@ async fn handle_report(
             return;
         }
     };
-    let row = state.store.get_user(&target_author).unwrap_or_else(|_| {
-        crate::store::UserRow {
+    let row = state
+        .store
+        .get_user(&target_author)
+        .unwrap_or_else(|_| crate::store::UserRow {
             user_id: target_author.clone(),
             ..Default::default()
-        }
-    });
+        });
     let decision = decide(EnforcementInput {
         cls: &cls,
         spam_threshold: state.config.policy.spam_threshold,
@@ -424,7 +448,16 @@ async fn handle_report(
     });
     let duplicate = state.store.already_enforced(&target_id).unwrap_or(false);
     if !duplicate {
-        apply_enforcement(&state, &room, &client, &target_id, &target_author, &cls, &decision).await;
+        apply_enforcement(
+            &state,
+            &room,
+            &client,
+            &target_id,
+            &target_author,
+            &cls,
+            &decision,
+        )
+        .await;
     }
     let (trust_label, prot_label) = state.trust_labels_inner(&target_author);
     let msg = diagnostic_message(
@@ -470,7 +503,12 @@ async fn classify_message(
         .await?;
     let raw = serde_json::json!({"answers": resp.answers, "model": resp.model});
     Ok(Classification::from_response(
-        &resp, raw, &state.spam_q, &state.lang_q, &state.cat_q, state.decider.model(),
+        &resp,
+        raw,
+        &state.spam_q,
+        &state.lang_q,
+        &state.cat_q,
+        state.decider.model(),
     ))
 }
 
@@ -488,7 +526,11 @@ async fn fetch_event_text(room: &Room, event_id: &str) -> Result<(String, String
         .and_then(|b| b.as_str())
         .unwrap_or("")
         .to_string();
-    let sender = v.get("sender").and_then(|s| s.as_str()).unwrap_or("").to_string();
+    let sender = v
+        .get("sender")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
     if body.is_empty() {
         anyhow::bail!("reported event has no readable text body");
     }
@@ -581,9 +623,11 @@ async fn warn_user(
             let reason = spam_reason(&cls.category, cls.spam_score);
             let cmd = build_warn_command(&state.config.rose.warn_template, author, &reason);
             if let Err(e) = room
-                .send(matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(
-                    cmd,
-                ))
+                .send(
+                    matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(
+                        cmd,
+                    ),
+                )
                 .await
             {
                 error!("rose warn command failed: {e:#}");
@@ -592,7 +636,10 @@ async fn warn_user(
             notify_mods(
                 state,
                 client,
-                &format!("Rose disabled; Telegram user {author} would be warned: {}", cls.category),
+                &format!(
+                    "Rose disabled; Telegram user {author} would be warned: {}",
+                    cls.category
+                ),
             )
             .await;
         }
@@ -622,9 +669,11 @@ async fn notify_mods(state: &AppState, client: &Client, text: &str) {
     };
     if let Some(room) = client.get_room(room_id) {
         let _ = room
-            .send(matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(
-                text.to_string(),
-            ))
+            .send(
+                matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(
+                    text.to_string(),
+                ),
+            )
             .await;
     } else {
         warn!("mod room {mod_room} not found; dropping notice: {text}");

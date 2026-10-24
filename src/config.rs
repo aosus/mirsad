@@ -112,10 +112,10 @@ pub struct TrustConfig {
     pub filler_min_chars: usize,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct ExclusionsConfig {
-    /// User IDs never auto-scanned / auto-punished (e.g. admins, bots).
-    /// Supports a trailing `*` wildcard, e.g. `@admin:*`.
+    /// User IDs never auto-scanned / auto-punished (admins, bots, bridges).
+    /// `*` matches any substring, e.g. `@admin:*` or `@bot*:aosus.org`.
     #[serde(default)]
     pub user_ids: Vec<String>,
 }
@@ -265,11 +265,6 @@ impl Default for TrustConfig {
         }
     }
 }
-impl Default for ExclusionsConfig {
-    fn default() -> Self {
-        Self { user_ids: vec![] }
-    }
-}
 impl Default for RoseConfig {
     fn default() -> Self {
         Self {
@@ -326,9 +321,7 @@ impl AppConfig {
             .add_source(config::Environment::with_prefix("MIRSAD").separator("__"))
             .build()
             .with_context(|| format!("reading config {}", path.display()))?;
-        let cfg: AppConfig = builder
-            .try_deserialize()
-            .context("parsing config.toml")?;
+        let cfg: AppConfig = builder.try_deserialize().context("parsing config.toml")?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -365,17 +358,42 @@ impl AppConfig {
 }
 
 pub fn is_excluded_user(patterns: &[String], user_id: &str) -> bool {
-    for p in patterns {
-        if p == user_id {
-            return true;
-        }
-        if let Some(prefix) = p.strip_suffix('*') {
-            if user_id.starts_with(prefix) {
-                return true;
-            }
+    patterns.iter().any(|p| glob_match(p, user_id))
+}
+
+/// `*` inside a pattern matches any (possibly empty) substring.
+/// e.g. `@admin:*` matches any id starting with `@admin:`,
+/// and `@bot*:aosus.org` matches `@bot123:aosus.org`.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    if !pattern.contains('*') {
+        return pattern == text;
+    }
+    let parts: Vec<&str> = pattern.split('*').collect();
+    let mut rest = text;
+    if !parts[0].is_empty() {
+        match rest.strip_prefix(parts[0]) {
+            Some(r) => rest = r,
+            None => return false,
         }
     }
-    false
+    let mut inner = rest;
+    for part in &parts[1..parts.len() - 1] {
+        if part.is_empty() {
+            continue;
+        }
+        match inner.find(part) {
+            Some(i) => inner = &inner[i + part.len()..],
+            None => return false,
+        }
+    }
+    let last = parts[parts.len() - 1];
+    if last.is_empty() {
+        return true;
+    }
+    if parts.len() == 2 {
+        return rest.ends_with(last);
+    }
+    inner.ends_with(last)
 }
 
 /// Placeholder expansion for templates with `{user}` / `{reason}`.
@@ -393,7 +411,10 @@ mod tests {
 
     #[test]
     fn exclusion_exact_and_wildcard() {
-        let patterns = vec!["@admin:aosus.org".to_string(), "@bot*:aosus.org".to_string()];
+        let patterns = vec![
+            "@admin:aosus.org".to_string(),
+            "@bot*:aosus.org".to_string(),
+        ];
         assert!(is_excluded_user(&patterns, "@admin:aosus.org"));
         assert!(is_excluded_user(&patterns, "@bot123:aosus.org"));
         assert!(!is_excluded_user(&patterns, "@user:aosus.org"));

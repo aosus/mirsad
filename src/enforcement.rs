@@ -33,7 +33,10 @@ impl Action {
     }
 
     pub fn destructive(&self) -> bool {
-        matches!(self, Action::Delete | Action::DeleteWarn | Action::DeleteBan)
+        matches!(
+            self,
+            Action::Delete | Action::DeleteWarn | Action::DeleteBan
+        )
     }
 }
 

@@ -13,7 +13,7 @@ pub struct Store {
     path: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct UserRow {
     pub user_id: String,
     pub activity_count: i64,
@@ -29,6 +29,25 @@ pub struct UserRow {
     pub matrix_warns: i64,
 }
 
+impl Default for UserRow {
+    /// Unknown users are protected by default (conservative: never auto-ban
+    /// someone whose history we have not verified as a newcomer).
+    fn default() -> Self {
+        Self {
+            user_id: String::new(),
+            activity_count: 0,
+            distinct_days: 0,
+            last_day: None,
+            last_activity_ts: 0,
+            trusted: false,
+            protected: true,
+            verified_newcomer: false,
+            baseline_seen: false,
+            matrix_warns: 0,
+        }
+    }
+}
+
 impl Store {
     pub fn open(path: &str) -> Result<Self> {
         if let Some(parent) = std::path::Path::new(path).parent() {
@@ -41,15 +60,6 @@ impl Store {
             path: path.to_string(),
         };
         s.migrate()?;
-        Ok(s)
-    }
-
-    pub fn open_memory() -> Result<Self> {
-        let s = Self {
-            path: ":memory:".to_string(),
-        };
-        // NOTE: :memory: with a new connection per call loses state.
-        // Tests use a file in a tempdir instead; this exists for API completeness.
         Ok(s)
     }
 
@@ -153,7 +163,12 @@ impl Store {
 
     /// Mark a user as seen at baseline (present when the bot first deployed)
     /// or as a verified newcomer (join observed after startup).
-    pub fn mark_membership(&self, user_id: &str, verified_newcomer: bool, baseline: bool) -> Result<UserRow> {
+    pub fn mark_membership(
+        &self,
+        user_id: &str,
+        verified_newcomer: bool,
+        baseline: bool,
+    ) -> Result<UserRow> {
         let mut u = self.get_user(user_id)?;
         if baseline {
             u.baseline_seen = true;
@@ -254,22 +269,22 @@ impl Store {
 
     pub fn already_enforced(&self, event_id: &str) -> Result<bool> {
         let c = self.conn()?;
-        Ok(c
-            .query_row(
-                "SELECT 1 FROM enforcements WHERE event_id = ?1",
-                [event_id],
-                |_| Ok(true),
-            )
-            .unwrap_or(false))
+        Ok(c.query_row(
+            "SELECT 1 FROM enforcements WHERE event_id = ?1",
+            [event_id],
+            |_| Ok(true),
+        )
+        .unwrap_or(false))
     }
 
     pub fn meta_get(&self, key: &str) -> Result<Option<String>> {
         let c = self.conn()?;
-        Ok(c
-            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| {
+        Ok(
+            c.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| {
                 r.get::<_, String>(0)
             })
-            .ok())
+            .ok(),
+        )
     }
 
     pub fn meta_set(&self, key: &str, value: &str) -> Result<()> {
@@ -316,14 +331,13 @@ mod tests {
     fn trust_earned_progressively_and_stale_resumes_scan() {
         let (_d, s) = tmp_store();
         let day1 = 1_700_000_000i64;
-        for _ in 0..10 {
-            // spread across 3 UTC days
-            s.record_legit_activity("@u:example.org", day1, 10, 3).unwrap();
-            s.record_legit_activity("@u:example.org", day1 + 86_400, 10, 3).unwrap();
-            s.record_legit_activity("@u:example.org", day1 + 2 * 86_400, 10, 3)
-                .unwrap();
-            break;
-        }
+        // 3 messages across 3 UTC days — not trusted yet.
+        s.record_legit_activity("@u:example.org", day1, 10, 3)
+            .unwrap();
+        s.record_legit_activity("@u:example.org", day1 + 86_400, 10, 3)
+            .unwrap();
+        s.record_legit_activity("@u:example.org", day1 + 2 * 86_400, 10, 3)
+            .unwrap();
         // 3 messages only — not trusted yet
         let u = s.get_user("@u:example.org").unwrap();
         assert!(!u.trusted);
@@ -337,7 +351,9 @@ mod tests {
         assert!(u.activity_count >= 10);
         assert!(u.trusted);
         // active trusted user: no scan
-        assert!(!s.needs_scan("@u:example.org", day1 + 3 * 86_400, 90).unwrap());
+        assert!(!s
+            .needs_scan("@u:example.org", day1 + 3 * 86_400, 90)
+            .unwrap());
         // after 90d inactivity: scan resumes, protection intact
         assert!(s
             .needs_scan("@u:example.org", day1 + 100 * 86_400, 90)

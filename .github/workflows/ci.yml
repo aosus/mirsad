@@ -50,7 +50,7 @@ jobs:
           sed -i 's#questions_file = .*#questions_file = "/tmp/mirsad-ci-check/questions.json"#' /tmp/mirsad-ci-check/config.toml
           echo "--- config used for check ---"
           grep -E "questions_file|spam_threshold" /tmp/mirsad-ci-check/config.toml
-      - run: cargo test --all-targets --locked=false
+      - run: cargo test --all-targets
       - name: check-config smoke test
         run: |
           mkdir -p /tmp/mirsad-smoke/config
@@ -69,7 +69,7 @@ jobs:
       - uses: dtolnay/rust-action-cache@v2
         with:
           cache-directories: target
-      - run: cargo build --release --locked=false
+      - run: cargo build --release
 
   docker:
     name: docker build

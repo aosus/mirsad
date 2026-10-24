@@ -121,8 +121,7 @@ impl DeciderClient {
             let short = truncate(&text, 500);
             anyhow::bail!("OpenRouter Decisions API error {status}: {short}");
         }
-        let parsed: DecisionsResponse =
-            resp.json().await.context("parsing Decisions response")?;
+        let parsed: DecisionsResponse = resp.json().await.context("parsing Decisions response")?;
         Ok(parsed)
     }
 }
@@ -261,8 +260,8 @@ mod tests {
     // Live HTTP test against a mock server (wiremock), not the real API.
     #[tokio::test]
     async fn classify_posts_to_openrouter_shape() {
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/alpha/decisions"))
