@@ -19,6 +19,9 @@ pub fn diagnostic_message(
     history_label: &str,
     decision: &EnforcementDecision,
     duplicate: bool,
+    // Enforcement failures (absent/empty = everything worked). Rendered so a
+    // failed redact/ban can never again look like a completed action.
+    outcome_failures: Option<&str>,
 ) -> String {
     let mut cats: Vec<(&String, &f64)> = cls.category_probs.iter().collect();
     cats.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -37,6 +40,12 @@ pub fn diagnostic_message(
     } else {
         ""
     };
+    let outcome = match outcome_failures {
+        Some(f) if !f.is_empty() => {
+            format!("\n⚠ Enforcement incomplete: {f}")
+        }
+        _ => String::new(),
+    };
     format!(
         "Mirsad report — {reported_event_id} by {author}\n\
          Evaluated: {snippet}\n\
@@ -47,7 +56,7 @@ pub fn diagnostic_message(
          Trust: {trust_label} · Protection: {protection_label}\n\
          History: {history_label}\n\
          Result: {action}\n\
-         {explanation}{dup}",
+         {explanation}{dup}{outcome}",
         snippet = snippet(reported_body_snippet),
         model = cls.model,
         spam = cls.spam_score * 100.0,
@@ -131,10 +140,49 @@ mod tests {
             "no prior room history",
             &d,
             false,
+            None,
         );
         assert!(msg.contains("89.9%"));
         assert!(msg.contains("threshold 90%"));
         assert!(msg.contains("No action"));
         assert!(msg.contains("investment"));
+    }
+
+    #[test]
+    fn diagnostic_shows_enforcement_failures() {
+        let cls = Classification {
+            spam_score: 0.99,
+            language_score: 0.0,
+            category: "employment".to_string(),
+            category_probs: HashMap::new(),
+            model: "m".to_string(),
+            raw: serde_json::json!({}),
+        };
+        let d = EnforcementDecision {
+            action: Action::DeleteWarn,
+            explanation: "would delete+warn".to_string(),
+            spam_hit: true,
+            language_hit: false,
+        };
+        let clean = diagnostic_message(
+            "x", "$e", "@u:x", &cls, 0.9, 0.9, "t", "p", "h", &d, false, None,
+        );
+        assert!(!clean.contains("Enforcement incomplete"));
+        let failed = diagnostic_message(
+            "x",
+            "$e",
+            "@u:x",
+            &cls,
+            0.9,
+            0.9,
+            "t",
+            "p",
+            "h",
+            &d,
+            false,
+            Some("message NOT deleted: 403"),
+        );
+        assert!(failed.contains("Enforcement incomplete"));
+        assert!(failed.contains("NOT deleted"));
     }
 }

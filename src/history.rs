@@ -35,14 +35,24 @@ pub struct HistoryInfo {
     pub verdict: Option<HistoryVerdict>,
     /// Number of prior events found (bounded by PAGE_LIMIT).
     pub prior_events: usize,
+    /// Distinct UTC days those events span.
+    pub distinct_days: usize,
     /// Age of the newest prior event, if any.
     pub newest_age_days: Option<i64>,
 }
 
-/// Pure verdict helper, unit-tested: ANY prior activity keeps protection.
-/// Only a complete absence of history lifts it.
-pub fn decide_verdict(prior_events: usize) -> HistoryVerdict {
-    if prior_events > 0 {
+/// Pure verdict helper, unit-tested. History only keeps protection if it would
+/// already have earned activity trust (enough messages across enough days):
+/// a burst of same-day messages is newcomer behaviour, not established
+/// membership. Only a complete absence of history, or thin same-day history,
+/// lifts protection.
+pub fn decide_verdict(
+    prior_events: usize,
+    distinct_days: usize,
+    min_messages: i64,
+    min_days: i64,
+) -> HistoryVerdict {
+    if prior_events as i64 >= min_messages && distinct_days as i64 >= min_days {
         HistoryVerdict::Established
     } else {
         HistoryVerdict::Newcomer
@@ -62,6 +72,7 @@ pub async fn check_sender_history(room: &Room, sender: &str) -> Result<HistoryIn
         .context("fetching sender history")?;
     let now_ms = chrono::Utc::now().timestamp_millis();
     let mut prior = 0usize;
+    let mut days = std::collections::HashSet::new();
     let mut newest_ts: Option<i64> = None;
     for ev in &page.chunk {
         let v = serde_json::to_value(ev.kind.raw()).context("serializing event")?;
@@ -70,12 +81,20 @@ pub async fn check_sender_history(room: &Room, sender: &str) -> Result<HistoryIn
             .and_then(|t| t.as_i64())
             .unwrap_or(0);
         prior += 1;
+        if ts > 0 {
+            if let Some(day) = chrono::DateTime::from_timestamp_millis(ts)
+                .map(|d| d.format("%Y-%m-%d").to_string())
+            {
+                days.insert(day);
+            }
+        }
         newest_ts = Some(newest_ts.map_or(ts, |m: i64| m.max(ts)));
     }
     let newest_age_days = newest_ts.map(|ts| (now_ms - ts).max(0) / 86_400_000);
     Ok(HistoryInfo {
-        verdict: Some(decide_verdict(prior)),
+        verdict: None, // decided by the caller against trust thresholds
         prior_events: prior,
+        distinct_days: days.len(),
         newest_age_days,
     })
 }
@@ -84,13 +103,14 @@ pub async fn check_sender_history(room: &Room, sender: &str) -> Result<HistoryIn
 pub fn history_label(info: &HistoryInfo) -> String {
     match info.verdict {
         None => "not checked".to_string(),
-        Some(HistoryVerdict::Newcomer) => {
-            "no prior messages in room history → treated as newcomer".to_string()
-        }
-        Some(HistoryVerdict::Established) => match (info.prior_events, info.newest_age_days) {
-            (n, Some(age)) => format!("{n} prior message(s), newest {age}d ago → protected"),
-            (n, None) => format!("{n} prior message(s) → protected"),
-        },
+        Some(HistoryVerdict::Newcomer) => format!(
+            "{} prior message(s) across {} day(s) → treated as newcomer",
+            info.prior_events, info.distinct_days
+        ),
+        Some(HistoryVerdict::Established) => format!(
+            "{} prior message(s) across {} day(s) → protected",
+            info.prior_events, info.distinct_days
+        ),
     }
 }
 
@@ -99,25 +119,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn any_history_keeps_protection() {
-        assert_eq!(decide_verdict(0), HistoryVerdict::Newcomer);
-        assert_eq!(decide_verdict(1), HistoryVerdict::Established);
-        assert_eq!(decide_verdict(50), HistoryVerdict::Established);
+    fn verdict_mirrors_trust_bar() {
+        // min 10 messages across 3 days
+        assert_eq!(decide_verdict(0, 0, 10, 3), HistoryVerdict::Newcomer);
+        assert_eq!(decide_verdict(3, 1, 10, 3), HistoryVerdict::Newcomer);
+        assert_eq!(decide_verdict(50, 1, 10, 3), HistoryVerdict::Newcomer);
+        assert_eq!(decide_verdict(9, 5, 10, 3), HistoryVerdict::Newcomer);
+        assert_eq!(decide_verdict(10, 3, 10, 3), HistoryVerdict::Established);
+        assert_eq!(decide_verdict(50, 30, 10, 3), HistoryVerdict::Established);
     }
 
     #[test]
     fn labels_describe_outcome() {
         let h = HistoryInfo {
             verdict: Some(HistoryVerdict::Newcomer),
-            prior_events: 0,
-            newest_age_days: None,
+            prior_events: 3,
+            distinct_days: 1,
+            newest_age_days: Some(0),
         };
         assert!(history_label(&h).contains("newcomer"));
+        assert!(history_label(&h).contains("1 day"));
         let h2 = HistoryInfo {
             verdict: Some(HistoryVerdict::Established),
-            prior_events: 5,
+            prior_events: 15,
+            distinct_days: 5,
             newest_age_days: Some(12),
         };
-        assert!(history_label(&h2).contains("12d"));
+        assert!(history_label(&h2).contains("5 day"));
     }
 }

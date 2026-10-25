@@ -41,7 +41,7 @@ use crate::{
     config::{AppConfig, Secrets},
     decider::{message_state, Classification, DeciderClient},
     enforcement::{decide, Action, EnforcementInput},
-    history::{check_sender_history, history_label, HistoryInfo, HistoryVerdict},
+    history::{check_sender_history, decide_verdict, history_label, HistoryInfo, HistoryVerdict},
     report::diagnostic_message,
     rose::{build_warn_command, is_bridged_telegram, spam_reason},
     store::Store,
@@ -536,8 +536,9 @@ async fn handle_report(
         prior_warns: row.matrix_warns,
     });
     let duplicate = state.store.already_enforced(&target_id).unwrap_or(false);
+    let mut failures = Vec::new();
     if !duplicate {
-        apply_enforcement(
+        failures = apply_enforcement(
             &state,
             &room,
             &client,
@@ -550,9 +551,14 @@ async fn handle_report(
     }
     let (trust_label, prot_label) = state.trust_labels_inner(&target_author);
     let prot_label = if !effective_protected && row.protected {
-        "newcomer (no prior room history)".to_string()
+        "newcomer (insufficient room history)".to_string()
     } else {
         prot_label
+    };
+    let outcome = if duplicate || failures.is_empty() {
+        None
+    } else {
+        Some(failures.join("; "))
     };
     let msg = diagnostic_message(
         &target_body,
@@ -566,6 +572,7 @@ async fn handle_report(
         &history_label(&history_info),
         &decision,
         duplicate,
+        outcome.as_deref(),
     );
     let _ = room
         .send(matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(msg))
@@ -608,7 +615,16 @@ async fn resolve_protection(
             return (true, HistoryInfo::default());
         }
     };
-    let verdict = info.verdict.unwrap_or(HistoryVerdict::Established);
+    let verdict = decide_verdict(
+        info.prior_events,
+        info.distinct_days,
+        state.config.trust.min_messages,
+        state.config.trust.min_days,
+    );
+    let info = HistoryInfo {
+        verdict: Some(verdict),
+        ..info
+    };
     state
         .history_cache
         .lock()
@@ -710,6 +726,9 @@ async fn fetch_event_text(room: &Room, event_id: &str) -> Result<(String, String
     Ok((body, sender))
 }
 
+/// Apply the enforcement decision. Returns a list of human-readable failure
+/// notes (empty when everything worked) so diagnostics report the OUTCOME,
+/// not just the intent — a 403 on redact must never again look like a delete.
 async fn apply_enforcement(
     state: &AppState,
     room: &Room,
@@ -718,7 +737,8 @@ async fn apply_enforcement(
     author: &str,
     cls: &Classification,
     decision: &crate::enforcement::EnforcementDecision,
-) {
+) -> Vec<String> {
+    let mut failures = Vec::new();
     let room_id = room.room_id().to_string();
     match decision.action {
         Action::None => {}
@@ -743,24 +763,29 @@ async fn apply_enforcement(
                 .unwrap_or(true)
             {
                 info!("duplicate enforcement suppressed for {event_id}");
-                return;
+                return vec!["already enforced earlier; no duplicate action taken".to_string()];
             }
             // Redact first so the content disappears even if later steps fail.
             if let Err(e) = redact(room, event_id).await {
                 error!("redact {event_id} failed: {e:#}");
+                failures.push(format!("message NOT deleted: {e:#}"));
             }
             if matches!(decision.action, Action::DeleteWarn | Action::DeleteBan) {
-                warn_user(state, client, room, author, cls).await;
+                if let Some(f) = warn_user(state, client, room, author, cls).await {
+                    failures.push(f);
+                }
             }
             if decision.action == Action::DeleteBan {
                 if let Err(e) = ban(room, author, cls).await {
                     error!("ban {author} failed: {e:#}");
+                    failures.push(format!("user NOT banned: {e:#}"));
                 } else {
                     info!("banned {author} for spam in {room_id}");
                 }
             }
         }
     }
+    failures
 }
 
 async fn redact(room: &Room, event_id: &str) -> Result<()> {
@@ -784,13 +809,16 @@ async fn ban(room: &Room, user_id: &str, cls: &Classification) -> Result<()> {
     Ok(())
 }
 
+/// Warn the author. Returns a failure note when the warning could not be
+/// delivered (Rose command send failure or bookkeeping error), so the
+/// diagnostic reflects reality.
 async fn warn_user(
     state: &AppState,
     client: &Client,
     room: &Room,
     author: &str,
     cls: &Classification,
-) {
+) -> Option<String> {
     if is_bridged_telegram(author) {
         if state.config.rose.enabled {
             let reason = spam_reason(&cls.category, cls.spam_score);
@@ -804,30 +832,38 @@ async fn warn_user(
                 .await
             {
                 error!("rose warn command failed: {e:#}");
+                return Some(format!("warn NOT delivered via Rose: {e:#}"));
             }
-        } else {
-            notify_mods(
-                state,
-                client,
-                &format!(
-                    "Rose disabled; Telegram user {author} would be warned: {}",
-                    cls.category
-                ),
-            )
-            .await;
+            return None;
         }
-    } else {
-        match state.store.add_matrix_warn(author) {
-            Ok(n) => {
-                let _ = room
-                    .send(
-                        matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(
+        notify_mods(
+            state,
+            client,
+            &format!(
+                "Rose disabled; Telegram user {author} would be warned: {}",
+                cls.category
+            ),
+        )
+        .await;
+        return Some(
+            "warn NOT delivered: Rose integration is disabled (moderators notified instead)"
+                .to_string(),
+        );
+    }
+    match state.store.add_matrix_warn(author) {
+        Ok(n) => {
+            let _ = room
+                .send(
+                    matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(
                             format!("{author}: warning {n} — unsolicited promotion is not allowed here. Further violations may lead to restrictions or moderator review."),
                         ),
                     )
-                    .await;
-            }
-            Err(e) => error!("matrix warn bookkeeping failed: {e:#}"),
+                .await;
+            None
+        }
+        Err(e) => {
+            error!("matrix warn bookkeeping failed: {e:#}");
+            Some(format!("warn NOT recorded: {e:#}"))
         }
     }
 }
