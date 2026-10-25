@@ -7,6 +7,8 @@
 homeserver = "https://matrix.aosus.org"
 user_id = "@mirsad:aosus.org"
 device_name = "mirsad"
+# Stable login device id — keep fixed per deployment, see code docs.
+device_id = "mirsad-bot"
 # Only moderate these rooms. Empty = all joined rooms.
 monitored_rooms = []
 # Private room for enforcement notices and classifier errors (optional).

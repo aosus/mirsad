@@ -109,6 +109,7 @@ pub async fn login(config: &AppConfig, secrets: &Secrets) -> Result<Client> {
         client
             .matrix_auth()
             .login_username(username, password)
+            .device_id(&config.matrix.device_id)
             .initial_device_display_name(&config.matrix.device_name)
             .send()
             .await

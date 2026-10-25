@@ -38,6 +38,11 @@ pub struct MatrixConfig {
     pub user_id: String,
     #[serde(default = "default_device_name")]
     pub device_name: String,
+    /// Stable login device id. MUST be fixed per deployment: a fresh random
+    /// device on every start invalidates the persisted E2EE/crypto store and
+    /// the bot fails to boot after any restart or redeploy.
+    #[serde(default = "default_device_id")]
+    pub device_id: String,
     /// Only these rooms are moderated. Empty = all joined rooms.
     #[serde(default)]
     pub monitored_rooms: Vec<String>,
@@ -153,6 +158,9 @@ fn default_homeserver() -> String {
 fn default_device_name() -> String {
     "mirsad".to_string()
 }
+fn default_device_id() -> String {
+    "mirsad-bot".to_string()
+}
 fn default_true() -> bool {
     true
 }
@@ -223,6 +231,7 @@ impl Default for MatrixConfig {
             homeserver: default_homeserver(),
             user_id: String::new(),
             device_name: default_device_name(),
+            device_id: default_device_id(),
             monitored_rooms: vec![],
             mod_room: None,
             autojoin: true,
