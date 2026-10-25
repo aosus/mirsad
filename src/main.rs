@@ -90,6 +90,6 @@ async fn main() -> Result<()> {
         live: std::sync::atomic::AtomicBool::new(false),
     });
 
-    let client = matrix::login(&cfg, &secrets).await?;
+    let client = matrix::login(&cfg, &secrets, &state.store).await?;
     matrix::run(client, state).await
 }

@@ -19,6 +19,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use matrix_sdk::{
+    authentication::matrix::MatrixSession,
     config::SyncSettings,
     event_handler::Ctx,
     ruma::{
@@ -30,6 +31,7 @@ use matrix_sdk::{
         },
         OwnedEventId, OwnedUserId,
     },
+    store::RoomLoadSettings,
     Client, Room, RoomState,
 };
 use tokio::sync::Mutex;
@@ -93,11 +95,35 @@ impl AppState {
     }
 }
 
-/// Build a logged-in client. v1 uses username+password login.
-pub async fn login(config: &AppConfig, secrets: &Secrets) -> Result<Client> {
+/// Build a logged-in client.
+///
+/// Prefers restoring a previously saved session (zero `/login` requests, so
+/// restarts never burn Synapse's per-IP login rate-limit budget). Falls back
+/// to username+password login and persists the new session for next time.
+pub async fn login(config: &AppConfig, secrets: &Secrets, store: &Store) -> Result<Client> {
     let builder = Client::builder().homeserver_url(&config.matrix.homeserver);
     let builder = builder.sqlite_store(&config.storage.matrix_store_path, None);
     let client = builder.build().await.context("building Matrix client")?;
+    if let Ok(Some(saved)) = store.meta_get(SESSION_KEY) {
+        match serde_json::from_str::<MatrixSession>(&saved) {
+            Ok(session) => {
+                match client
+                    .matrix_auth()
+                    .restore_session(session, RoomLoadSettings::default())
+                    .await
+                {
+                    Ok(()) => {
+                        info!("restored saved Matrix session (no fresh login needed)");
+                        return Ok(client);
+                    }
+                    Err(e) => {
+                        warn!("saved Matrix session invalid ({e:#}); logging in fresh");
+                    }
+                }
+            }
+            Err(e) => warn!("could not parse saved Matrix session ({e:#}); logging in fresh"),
+        }
+    }
     let username = config
         .matrix
         .user_id
@@ -115,6 +141,18 @@ pub async fn login(config: &AppConfig, secrets: &Secrets) -> Result<Client> {
             .await
             .context("Matrix login failed")?;
         info!("logged in as {}", config.matrix.user_id);
+        // Persist the session (access token) so the next boot restores it.
+        match client.matrix_auth().session() {
+            Some(session) => match serde_json::to_string(&session) {
+                Ok(json) => {
+                    if let Err(e) = store.meta_set(SESSION_KEY, &json) {
+                        warn!("could not persist Matrix session: {e:#}");
+                    }
+                }
+                Err(e) => warn!("could not serialize Matrix session: {e:#}"),
+            },
+            None => warn!("login succeeded but no session available to persist"),
+        }
     } else if secrets.matrix_access_token.is_some() {
         anyhow::bail!(
             "MATRIX_ACCESS_TOKEN restore is not implemented in v1; set MATRIX_PASSWORD instead"
@@ -124,6 +162,8 @@ pub async fn login(config: &AppConfig, secrets: &Secrets) -> Result<Client> {
     }
     Ok(client)
 }
+
+const SESSION_KEY: &str = "matrix_session";
 
 pub async fn run(client: Client, state: Arc<AppState>) -> Result<()> {
     // Greet + baseline: first sync establishes the token; handlers attach after
