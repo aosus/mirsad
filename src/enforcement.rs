@@ -98,7 +98,7 @@ pub fn decide(inp: EnforcementInput<'_>) -> EnforcementDecision {
             return EnforcementDecision {
                 action: Action::DeleteBan,
                 explanation: format!(
-                    "Clear spam from a verified newcomer (spam {:.1}% ≥ {:.0}%); deleting and banning.",
+                    "Clear spam from a verified newcomer (spam {:.1}% ≥ {:.0}%); deleting all recent messages and banning.",
                     inp.cls.spam_score * 100.0,
                     inp.spam_threshold * 100.0
                 ),

@@ -22,6 +22,7 @@ use matrix_sdk::{
     authentication::matrix::MatrixSession,
     config::SyncSettings,
     event_handler::Ctx,
+    room::MessagesOptions,
     ruma::{
         events::room::{
             member::{MembershipState, OriginalSyncRoomMemberEvent, StrippedRoomMemberEvent},
@@ -29,7 +30,7 @@ use matrix_sdk::{
                 MessageType, OriginalSyncRoomMessageEvent, Relation, RoomMessageEventContent,
             },
         },
-        OwnedEventId, OwnedUserId,
+        OwnedEventId, OwnedUserId, UInt,
     },
     store::RoomLoadSettings,
     Client, Room, RoomState,
@@ -776,6 +777,16 @@ async fn apply_enforcement(
                 }
             }
             if decision.action == Action::DeleteBan {
+                let (bulk_ok, bulk_failed) =
+                    bulk_redact_user_messages(room, author, event_id).await;
+                if bulk_ok + bulk_failed > 0 {
+                    info!("bulk redact for {author}: {bulk_ok} deleted, {bulk_failed} failed");
+                }
+                if bulk_failed > 0 {
+                    failures.push(format!(
+                        "bulk cleanup incomplete: {bulk_ok} deleted, {bulk_failed} failed"
+                    ));
+                }
                 if let Err(e) = ban(room, author, cls).await {
                     error!("ban {author} failed: {e:#}");
                     failures.push(format!("user NOT banned: {e:#}"));
@@ -796,6 +807,67 @@ async fn redact(room: &Room, event_id: &str) -> Result<()> {
         .await
         .context("redact failed")?;
     Ok(())
+}
+
+/// Upper bound on recent messages pulled for newcomer bulk cleanup.
+const BULK_REDACT_LIMIT: u8 = 100;
+
+/// Redact the author's recent messages (newest first, excluding the already
+/// handled triggering event). Best-effort: returns (deleted, failed).
+async fn bulk_redact_user_messages(
+    room: &Room,
+    author: &str,
+    exclude_event_id: &str,
+) -> (usize, usize) {
+    let target: OwnedUserId = match author.try_into() {
+        Ok(u) => u,
+        Err(_) => return (0, 0),
+    };
+    let mut opts = MessagesOptions::backward();
+    opts.limit = UInt::from(BULK_REDACT_LIMIT);
+    opts.filter.senders = Some(vec![target]);
+    let page = match room.messages(opts).await {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("bulk redact history fetch failed for {author}: {e:#}");
+            return (0, 0);
+        }
+    };
+    let values: Vec<serde_json::Value> = page
+        .chunk
+        .iter()
+        .filter_map(|ev| serde_json::to_value(ev.kind.raw()).ok())
+        .collect();
+    let mut ok = 0usize;
+    let mut failed = 0usize;
+    for id in redact_candidates(&values, author, exclude_event_id) {
+        match redact(room, &id).await {
+            Ok(()) => ok += 1,
+            Err(e) => {
+                warn!("bulk redact {id} failed: {e:#}");
+                failed += 1;
+            }
+        }
+    }
+    (ok, failed)
+}
+
+/// Event ids in `events` (raw event JSON) authored by `sender` of type
+/// m.room.message, excluding `exclude`. Pure and unit-tested.
+fn redact_candidates(events: &[serde_json::Value], sender: &str, exclude: &str) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|v| {
+            let s = v.get("sender")?.as_str()?;
+            let id = v.get("event_id")?.as_str()?;
+            let t = v.get("type")?.as_str()?;
+            if s == sender && id != exclude && t == "m.room.message" {
+                Some(id.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 async fn ban(room: &Room, user_id: &str, cls: &Classification) -> Result<()> {
@@ -910,5 +982,22 @@ mod tests {
         assert_eq!(reply_target_id(&c), Some("$parent:example.org".to_string()));
         let plain = text_content("just chatting", None);
         assert_eq!(reply_target_id(&plain), None);
+    }
+
+    #[test]
+    fn bulk_redact_picks_own_messages_only() {
+        let ev = |sender: &str, id: &str, typ: &str| serde_json::json!({"sender": sender, "event_id": id, "type": typ});
+        let events = vec![
+            ev("@spam:x", "$1", "m.room.message"),
+            ev("@spam:x", "$trigger", "m.room.message"),
+            ev("@other:x", "$2", "m.room.message"),
+            ev("@spam:x", "$3", "m.room.member"),
+            serde_json::json!({"no": "sender"}),
+        ];
+        assert_eq!(
+            redact_candidates(&events, "@spam:x", "$trigger"),
+            vec!["$1".to_string()]
+        );
+        assert!(redact_candidates(&events, "@nobody:x", "$trigger").is_empty());
     }
 }
