@@ -318,6 +318,17 @@ async fn on_message(
         return;
     }
     note_first_sighting(&state, &sender);
+    // Replies to our own messages (reports, warnings, notices) are conversation
+    // about moderation, not new community content: never analyze them. Without
+    // this, discussing a diagnostic would classify our own quoted spam text.
+    if let Some(parent_id) = reply_target_id(&ev.content) {
+        if let Ok(parent_sender) = fetch_event_sender(&room, &parent_id).await {
+            if !own_id.is_empty() && parent_sender == own_id {
+                return;
+            }
+        }
+        // Fetch failed: fall through to normal scanning (fail-closed for spam).
+    }
     let now = chrono::Utc::now().timestamp();
     let needs = state
         .store
@@ -433,10 +444,7 @@ async fn handle_report(
         return;
     }
     // Find the reported event: prefer in-reply-to, else the message itself is unusable.
-    let reported_id: Option<String> = ev.content.relates_to.as_ref().and_then(|r| match r {
-        Relation::Reply(reply) => Some(reply.in_reply_to.event_id.to_string()),
-        _ => None,
-    });
+    let reported_id: Option<String> = reply_target_id(&ev.content);
     let Some(target_id) = reported_id else {
         let _ = room.send(matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(
             "Reply to the suspicious message with /spam (or mention me in the reply) so I know what to check.",
@@ -458,6 +466,21 @@ async fn handle_report(
             return;
         }
     };
+
+    // Never analyze our own messages: a reply to one of our reports, warnings
+    // or diagnostics would otherwise make us classify our own output (and the
+    // diagnostic text quotes the original spam, guaranteeing nonsense).
+    let own_id = client.user_id().map(|u| u.to_string()).unwrap_or_default();
+    if !own_id.is_empty() && target_author == own_id {
+        let _ = room
+            .send(
+                matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(
+                    crate::report::own_message_response(),
+                ),
+            )
+            .await;
+        return;
+    }
 
     // FRESH classification, ignoring trust/cache.
     let room_id = room.room_id().to_string();
@@ -551,6 +574,29 @@ async fn classify_message(
         &state.cat_q,
         state.decider.model(),
     ))
+}
+
+/// The event id this message replies to, if any.
+fn reply_target_id(content: &RoomMessageEventContent) -> Option<String> {
+    content.relates_to.as_ref().and_then(|r| match r {
+        Relation::Reply(reply) => Some(reply.in_reply_to.event_id.to_string()),
+        _ => None,
+    })
+}
+
+async fn fetch_event_sender(room: &Room, event_id: &str) -> Result<String> {
+    let owned: OwnedEventId = event_id
+        .try_into()
+        .map_err(|e| anyhow::anyhow!("bad event id: {e}"))?;
+    let tl = room
+        .event(&owned, None)
+        .await
+        .context("fetching parent event")?;
+    let v = serde_json::to_value(tl.kind.raw()).context("serializing event")?;
+    Ok(v.get("sender")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string())
 }
 
 async fn fetch_event_text(room: &Room, event_id: &str) -> Result<(String, String)> {
@@ -718,5 +764,29 @@ async fn notify_mods(state: &AppState, client: &Client, text: &str) {
             .await;
     } else {
         warn!("mod room {mod_room} not found; dropping notice: {text}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text_content(body: &str, relates_to: Option<serde_json::Value>) -> RoomMessageEventContent {
+        let mut v = serde_json::json!({"msgtype": "m.text", "body": body});
+        if let Some(r) = relates_to {
+            v["m.relates_to"] = r;
+        }
+        serde_json::from_value(v).expect("test content parses")
+    }
+
+    #[test]
+    fn reply_target_extracted() {
+        let c = text_content(
+            "look at this",
+            Some(serde_json::json!({"m.in_reply_to": {"event_id": "$parent:example.org"}})),
+        );
+        assert_eq!(reply_target_id(&c), Some("$parent:example.org".to_string()));
+        let plain = text_content("just chatting", None);
+        assert_eq!(reply_target_id(&plain), None);
     }
 }

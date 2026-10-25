@@ -78,11 +78,25 @@ fn action_label(a: &crate::enforcement::Action) -> &'static str {
     }
 }
 
+/// Reply sent when someone reports one of the bot's own messages (a diagnostic
+/// report, warning, etc.). We never classify our own output.
+pub fn own_message_response() -> &'static str {
+    "That's one of my own messages (a report, warning or notice) — I don't analyze my own output. If the original suspicious message is still there, reply to *it* with /spam and I'll check it."
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::enforcement::Action;
     use std::collections::HashMap;
+
+    #[test]
+    fn own_message_response_points_back_to_original() {
+        let msg = own_message_response();
+        assert!(msg.contains("/spam"));
+        // Must not contain anything that looks like a verdict on the message.
+        assert!(!msg.contains("Spam:"));
+    }
 
     #[test]
     fn diagnostic_contains_scores_and_thresholds() {
