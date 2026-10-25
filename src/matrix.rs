@@ -41,6 +41,7 @@ use crate::{
     config::{AppConfig, Secrets},
     decider::{message_state, Classification, DeciderClient},
     enforcement::{decide, Action, EnforcementInput},
+    history::{check_sender_history, history_label, HistoryInfo, HistoryVerdict},
     report::diagnostic_message,
     rose::{build_warn_command, is_bridged_telegram, spam_reason},
     store::Store,
@@ -55,6 +56,8 @@ pub struct AppState {
     pub decider: DeciderClient,
     pub store: Store,
     pub reports: Mutex<HashMap<String, Vec<Instant>>>,
+    /// Suspect history verdicts per room|user, with check timestamp (24h TTL).
+    pub history_cache: Mutex<HashMap<String, (i64, HistoryInfo)>>,
     pub live: AtomicBool,
 }
 
@@ -348,12 +351,23 @@ async fn on_message(
                     ..Default::default()
                 });
             let excluded = state.config.is_excluded(&sender);
+            let spam_hit = cls.spam_score >= state.config.policy.spam_threshold;
+            let (effective_protected, _history) = resolve_protection(
+                &state,
+                &room,
+                &sender,
+                row.protected,
+                row.baseline_seen,
+                row.verified_newcomer,
+                spam_hit,
+            )
+            .await;
             let decision = decide(EnforcementInput {
                 cls: &cls,
                 spam_threshold: state.config.policy.spam_threshold,
                 language_threshold: state.config.policy.language_threshold,
                 language_action: &state.config.policy.language_action,
-                protected: row.protected,
+                protected: effective_protected,
                 excluded,
                 dry_run: state.config.policy.dry_run,
                 prior_warns: row.matrix_warns,
@@ -500,12 +514,23 @@ async fn handle_report(
             user_id: target_author.clone(),
             ..Default::default()
         });
+    let spam_hit = cls.spam_score >= state.config.policy.spam_threshold;
+    let (effective_protected, history_info) = resolve_protection(
+        &state,
+        &room,
+        &target_author,
+        row.protected,
+        row.baseline_seen,
+        row.verified_newcomer,
+        spam_hit,
+    )
+    .await;
     let decision = decide(EnforcementInput {
         cls: &cls,
         spam_threshold: state.config.policy.spam_threshold,
         language_threshold: state.config.policy.language_threshold,
         language_action: &state.config.policy.language_action,
-        protected: row.protected,
+        protected: effective_protected,
         excluded: state.config.is_excluded(&target_author),
         dry_run: state.config.policy.dry_run,
         prior_warns: row.matrix_warns,
@@ -524,6 +549,11 @@ async fn handle_report(
         .await;
     }
     let (trust_label, prot_label) = state.trust_labels_inner(&target_author);
+    let prot_label = if !effective_protected && row.protected {
+        "newcomer (no prior room history)".to_string()
+    } else {
+        prot_label
+    };
     let msg = diagnostic_message(
         &target_body,
         &target_id,
@@ -533,12 +563,68 @@ async fn handle_report(
         state.config.policy.language_threshold,
         &trust_label,
         &prot_label,
+        &history_label(&history_info),
         &decision,
         duplicate,
     );
     let _ = room
         .send(matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(msg))
         .await;
+}
+
+/// Resolve effective ban-protection for a spam-flagged sender.
+///
+/// Verified newcomers are ban-eligible; baseline/established members stay
+/// protected. For unknown-history senders, one server-filtered history lookup
+/// decides: no visible prior events → newcomer; anything found, a disabled
+/// check, or any lookup failure → protected. Verdicts cache per room+sender
+/// for 24h so repeat offenders cost one lookup a day.
+async fn resolve_protection(
+    state: &AppState,
+    room: &Room,
+    sender: &str,
+    row_protected: bool,
+    baseline_seen: bool,
+    verified_newcomer: bool,
+    spam_hit: bool,
+) -> (bool, HistoryInfo) {
+    if !spam_hit || !row_protected || baseline_seen || verified_newcomer {
+        return (row_protected, HistoryInfo::default());
+    }
+    if !state.config.history.enabled {
+        return (true, HistoryInfo::default());
+    }
+    let key = format!("{}|{sender}", room.room_id());
+    if let Some(info) = get_cached_history(state, &key).await {
+        return (
+            matches!(info.verdict, Some(HistoryVerdict::Established)),
+            info,
+        );
+    }
+    let info = match check_sender_history(room, sender).await {
+        Ok(info) => info,
+        Err(e) => {
+            warn!("sender history check failed for {sender}: {e:#}; staying protected");
+            return (true, HistoryInfo::default());
+        }
+    };
+    let verdict = info.verdict.unwrap_or(HistoryVerdict::Established);
+    state
+        .history_cache
+        .lock()
+        .await
+        .insert(key, (chrono::Utc::now().timestamp(), info.clone()));
+    (matches!(verdict, HistoryVerdict::Established), info)
+}
+
+async fn get_cached_history(state: &AppState, key: &str) -> Option<HistoryInfo> {
+    let cache = state.history_cache.lock().await;
+    let (ts, info) = cache.get(key)?;
+    if chrono::Utc::now().timestamp() - ts < 86_400 {
+        Some(info.clone())
+    } else {
+        None
+    }
 }
 
 async fn check_rate_limit(state: &AppState, reporter: &str) -> bool {

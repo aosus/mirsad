@@ -16,6 +16,7 @@ pub fn diagnostic_message(
     language_threshold: f64,
     trust_label: &str,
     protection_label: &str,
+    history_label: &str,
     decision: &EnforcementDecision,
     duplicate: bool,
 ) -> String {
@@ -44,6 +45,7 @@ pub fn diagnostic_message(
          Language violation: {lang:.1}% (threshold {lang_th:.0}%)\n\
          {cat_line}\n\
          Trust: {trust_label} · Protection: {protection_label}\n\
+         History: {history_label}\n\
          Result: {action}\n\
          {explanation}{dup}",
         snippet = snippet(reported_body_snippet),
@@ -126,6 +128,7 @@ mod tests {
             0.9,
             "untrusted newcomer",
             "verified newcomer",
+            "no prior room history",
             &d,
             false,
         );

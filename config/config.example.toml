@@ -48,10 +48,16 @@ filler_min_chars = 5
 
 [exclusions]
 # Users never auto-scanned or auto-punished (admins, bots, bridges).
-# Supports a trailing * wildcard, e.g. "@admin:*".
+# `*` matches any substring, e.g. `@admin:*` or `@bot*:aosus.org`.
 user_ids = [
   "@admin:aosus.org",
 ]
+
+[history]
+# Suspect-triggered sender history check: when spam scores high but membership
+# history is unknown, look up the sender's own recent room events (server-side
+# filter, one cheap request). No visible history → treat as newcomer.
+enabled = true
 
 [rose]
 enabled = false

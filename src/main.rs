@@ -87,6 +87,7 @@ async fn main() -> Result<()> {
         decider,
         store,
         reports: Mutex::new(HashMap::new()),
+        history_cache: Mutex::new(HashMap::new()),
         live: std::sync::atomic::AtomicBool::new(false),
     });
 

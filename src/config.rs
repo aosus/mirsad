@@ -21,6 +21,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub exclusions: ExclusionsConfig,
     #[serde(default)]
+    pub history: HistoryConfig,
+    #[serde(default)]
     pub rose: RoseConfig,
     #[serde(default)]
     pub report: ReportConfig,
@@ -123,6 +125,20 @@ pub struct ExclusionsConfig {
     /// `*` matches any substring, e.g. `@admin:*` or `@bot*:aosus.org`.
     #[serde(default)]
     pub user_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct HistoryConfig {
+    /// Suspect-triggered sender history check (one server-filtered request).
+    /// Resolves "unknown history" into newcomer/established before enforcing.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for HistoryConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -437,6 +453,7 @@ mod tests {
             policy: PolicyConfig::default(),
             trust: TrustConfig::default(),
             exclusions: ExclusionsConfig::default(),
+            history: HistoryConfig::default(),
             rose: RoseConfig::default(),
             report: ReportConfig::default(),
             storage: StorageConfig::default(),
@@ -455,6 +472,7 @@ mod tests {
             policy: PolicyConfig::default(),
             trust: TrustConfig::default(),
             exclusions: ExclusionsConfig::default(),
+            history: HistoryConfig::default(),
             rose: RoseConfig::default(),
             report: ReportConfig::default(),
             storage: StorageConfig::default(),

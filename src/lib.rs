@@ -4,6 +4,7 @@
 pub mod config;
 pub mod decider;
 pub mod enforcement;
+pub mod history;
 pub mod matrix;
 pub mod policy;
 pub mod report;
