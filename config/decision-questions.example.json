@@ -2,29 +2,29 @@
   "questions": {
     "spam": {
       "type": "noul",
-      "instructions": "Does this chat message constitute unsolicited promotional spam for the Aosus community?",
+      "instructions": "Is this message unsolicited promotional spam in Aosus, an Arabic-only discussion community? Judge its intent, not individual keywords. Understand Arabic dialects, indirect solicitation and obfuscated text.",
       "criteria": {
-        "true": "Unsolicited commercial promotion: investment/IPO solicitation, guaranteed returns, crypto schemes, fake or vague job offers, work-from-home earning claims, referral/rewards schemes, money-making apps, or any advertisement the recipient did not ask for. Obfuscated spam (extra symbols, mixed scripts, QR/link lures) still counts.",
-        "false": "Legitimate discussion, including talking ABOUT investments or jobs, criticizing or quoting spam to warn others, technical talk with English terms/code/URLs, or messages with no promotional intent."
+        "true": "Unsolicited advertising, investment or IPO promotions, cryptocurrency schemes, guaranteed earnings, vague job recruitment, work-from-home income offers, reward or referral schemes, or invitations to contact someone privately for financial opportunities. Includes indirect and disguised promotion even without links.",
+        "false": "Genuine discussion, questions, advice, news, educational content, personal experiences, warnings about scams, or quotations of advertisements without endorsing them. Mentioning finance, jobs, links or usernames alone is not spam."
       }
     },
     "language_violation": {
       "type": "noul",
-      "instructions": "Is this message primarily written in a language other than Arabic?",
+      "instructions": "Does this message violate Aosus's Arabic-only language policy?",
       "criteria": {
-        "true": "The message body is mostly non-Arabic prose (e.g. a full English/Chinese advertisement or conversation).",
-        "false": "Arabic discussion that happens to contain English technical terms, code, URLs, product names, error messages, or short quoted foreign material."
+        "true": "The main natural-language content is in English, Chinese, Japanese or another non-Arabic language.",
+        "false": "The message is primarily Arabic, including regional dialects and recognizable Arabizi, or contains incidental foreign terminology, code, error messages, URLs, product names or quotations in an Arabic discussion."
       }
     },
     "spam_category": {
       "type": "choice",
-      "instructions": "What is the primary category of this message?",
+      "instructions": "What is the primary spam category? Select none when the message is not promotional spam, even if it violates the language policy.",
       "criteria": {
-        "investment": "Investment or financial solicitation: IPOs, trading, guaranteed returns, crypto.",
-        "jobs": "Employment or income opportunity: job ads, hiring, work-from-home offers.",
-        "referral": "Referral or rewards scheme: invite links, bonuses, money-making apps.",
-        "other_ads": "Other unsolicited advertisement not covered above.",
-        "legitimate": "Not promotional spam: normal discussion, questions, criticism of spam."
+        "investment": "Investment, trading, IPO subscriptions, crypto or profit schemes.",
+        "employment": "Vague employment, remote-work recruitment or easy-income promises.",
+        "referral": "Reward apps, surveys, affiliate promotions or referral-based earning schemes.",
+        "advertisement": "Other unsolicited commercial advertising or promotional invitations.",
+        "none": "No promotional spam detected."
       }
     }
   }
