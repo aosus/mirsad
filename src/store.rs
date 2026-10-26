@@ -26,6 +26,9 @@ pub struct UserRow {
     pub protected: bool,
     pub verified_newcomer: bool,
     pub baseline_seen: bool,
+    /// Warns issued by Mirsad itself, all platforms (Matrix-native warnings
+    /// and Rose commands sent through the bridge). Drives repeat escalation.
+    /// Counts OUR warns only — Rose's counters are never mirrored here.
     pub matrix_warns: i64,
 }
 

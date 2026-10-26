@@ -38,11 +38,20 @@ pub fn build_warn_command(template: &str, matrix_user_id: &str, reason: &str) ->
     expand_template(template, &vars)
 }
 
-/// Reason string attached to bans / warn commands.
+/// Reason string attached to bans / spam warns.
 pub fn spam_reason(category: &str, spam_score: f64) -> String {
     format!(
         "spam ({category}, {:.0}%) — automated removal by Mirsad",
         spam_score * 100.0
+    )
+}
+
+/// Reason string attached to language-policy warns. Kept distinct from the
+/// spam reason: a "spam (none, 9%)" label on a language warn is nonsense.
+pub fn language_reason(language_score: f64) -> String {
+    format!(
+        "non-Arabic message (language {:.0}%) — automated removal by Mirsad",
+        language_score * 100.0
     )
 }
 

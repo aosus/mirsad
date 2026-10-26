@@ -44,7 +44,7 @@ use crate::{
     enforcement::{decide, Action, EnforcementInput},
     history::{check_sender_history, decide_verdict, history_label, HistoryInfo, HistoryVerdict},
     report::diagnostic_message,
-    rose::{build_warn_command, is_bridged_telegram, spam_reason},
+    rose::{build_warn_command, is_bridged_telegram, language_reason, spam_reason},
     store::Store,
 };
 
@@ -741,6 +741,14 @@ async fn apply_enforcement(
 ) -> Vec<String> {
     let mut failures = Vec::new();
     let room_id = room.room_id().to_string();
+    info!(
+        "enforcement for {author} in {room_id}: {} (spam {:.1}%, lang {:.1}%, cat {}) — {}",
+        decision.action.as_str(),
+        cls.spam_score * 100.0,
+        cls.language_score * 100.0,
+        cls.category,
+        decision.explanation,
+    );
     match decision.action {
         Action::None => {}
         Action::NotifyMods => {
@@ -891,9 +899,21 @@ async fn warn_user(
     author: &str,
     cls: &Classification,
 ) -> Option<String> {
+    // Every Mirsad-issued warn counts locally (all platforms) so repeat
+    // offenders escalate even when Rose owns the Telegram-side history.
+    // (This counts OUR warns, not Rose's — no counter syncing involved.)
+    if let Err(e) = state.store.add_matrix_warn(author) {
+        error!("warn bookkeeping failed for {author}: {e:#}");
+        return Some(format!("warn NOT recorded: {e:#}"));
+    }
     if is_bridged_telegram(author) {
+        let spam_path = cls.spam_score >= state.config.policy.spam_threshold;
+        let reason = if spam_path {
+            spam_reason(&cls.category, cls.spam_score)
+        } else {
+            language_reason(cls.language_score)
+        };
         if state.config.rose.enabled {
-            let reason = spam_reason(&cls.category, cls.spam_score);
             let cmd = build_warn_command(&state.config.rose.warn_template, author, &reason);
             if let Err(e) = room
                 .send(
@@ -906,15 +926,13 @@ async fn warn_user(
                 error!("rose warn command failed: {e:#}");
                 return Some(format!("warn NOT delivered via Rose: {e:#}"));
             }
+            info!("rose warn sent for {author} ({reason})");
             return None;
         }
         notify_mods(
             state,
             client,
-            &format!(
-                "Rose disabled; Telegram user {author} would be warned: {}",
-                cls.category
-            ),
+            &format!("Rose disabled; Telegram user {author} would be warned: {reason}"),
         )
         .await;
         return Some(
@@ -922,22 +940,19 @@ async fn warn_user(
                 .to_string(),
         );
     }
-    match state.store.add_matrix_warn(author) {
-        Ok(n) => {
-            let _ = room
-                .send(
-                    matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(
-                            format!("{author}: warning {n} — unsolicited promotion is not allowed here. Further violations may lead to restrictions or moderator review."),
-                        ),
-                    )
-                .await;
-            None
-        }
-        Err(e) => {
-            error!("matrix warn bookkeeping failed: {e:#}");
-            Some(format!("warn NOT recorded: {e:#}"))
-        }
-    }
+    let n = state
+        .store
+        .get_user(author)
+        .map(|u| u.matrix_warns)
+        .unwrap_or(0);
+    let _ = room
+        .send(
+            matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(
+                    format!("{author}: warning {n} — unsolicited promotion is not allowed here. Further violations may lead to restrictions or moderator review."),
+                ),
+            )
+        .await;
+    None
 }
 
 async fn notify_mods(state: &AppState, client: &Client, text: &str) {

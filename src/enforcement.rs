@@ -131,7 +131,9 @@ pub fn decide(inp: EnforcementInput<'_>) -> EnforcementDecision {
         };
     }
 
-    // Language path: independent of spam, never a ban.
+    // Language path: independent of spam. Protected members are warned, never
+    // banned; newcomers with no standing get removed outright (critical by
+    // default in an Arabic-only group).
     if language_hit {
         match inp.language_action {
             "ignore" => {
@@ -169,6 +171,18 @@ pub fn decide(inp: EnforcementInput<'_>) -> EnforcementDecision {
                     return EnforcementDecision {
                         action: Action::NotifyMods,
                         explanation: "Dry-run: language violation would be warned.".to_string(),
+                        spam_hit,
+                        language_hit,
+                    };
+                }
+                if !inp.protected {
+                    return EnforcementDecision {
+                        action: Action::DeleteBan,
+                        explanation: format!(
+                            "Newcomer posted a non-Arabic message (language {:.1}% ≥ {:.0}%) in an Arabic-only group; deleting and banning.",
+                            inp.cls.language_score * 100.0,
+                            inp.language_threshold * 100.0
+                        ),
                         spam_hit,
                         language_hit,
                     };
@@ -278,10 +292,18 @@ mod tests {
     }
 
     #[test]
-    fn language_violation_not_a_ban() {
+    fn newcomer_language_violation_banned_outright() {
         let c = cls(0.1, 0.95);
         let mut i = base(&c);
         i.protected = false;
+        assert_eq!(decide(i).action, Action::DeleteBan);
+    }
+
+    #[test]
+    fn protected_language_violation_only_warned() {
+        let c = cls(0.1, 0.95);
+        let mut i = base(&c);
+        i.protected = true;
         let d = decide(i);
         assert_ne!(d.action, Action::DeleteBan);
         assert_eq!(d.action, Action::DeleteWarn);
