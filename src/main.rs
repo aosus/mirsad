@@ -35,17 +35,30 @@ async fn main() -> Result<()> {
         .with_context(|| format!("loading {}", cli.config.display()))?;
     let policy = policy::PolicyFile::load(std::path::Path::new(&cfg.policy.questions_file))
         .context("loading decision-questions file")?;
-    // The configured question ids must exist in the policy file.
+    // Every *configured* question id must exist in the policy file.
+    // Roles left unconfigured are disabled (never crash on a question the
+    // admin removed from the policy).
     for q in [
         &cfg.policy.spam_question,
         &cfg.policy.language_question,
         &cfg.policy.category_question,
-    ] {
+    ]
+    .into_iter()
+    .flatten()
+    {
         anyhow::ensure!(
             policy.questions.contains_key(q),
             "policy question '{q}' missing from {}",
             cfg.policy.questions_file
         );
+    }
+    if cfg.policy.spam_question.is_none() {
+        tracing::warn!(
+            "no spam_question configured: spam enforcement is DISABLED, the bot will only observe"
+        );
+    }
+    if cfg.policy.language_question.is_none() {
+        tracing::info!("no language_question configured: language enforcement is disabled");
     }
     tracing::info!(
         "policy loaded: {} questions from {}",
@@ -81,9 +94,9 @@ async fn main() -> Result<()> {
     let state = Arc::new(matrix::AppState {
         config: cfg.clone(),
         questions: policy.as_api_value(),
-        spam_q: cfg.policy.spam_question.clone(),
-        lang_q: cfg.policy.language_question.clone(),
-        cat_q: cfg.policy.category_question.clone(),
+        spam_q: cfg.policy.spam_question.clone().unwrap_or_default(),
+        lang_q: cfg.policy.language_question.clone().unwrap_or_default(),
+        cat_q: cfg.policy.category_question.clone().unwrap_or_default(),
         decider,
         store,
         reports: Mutex::new(HashMap::new()),

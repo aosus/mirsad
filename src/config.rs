@@ -82,15 +82,18 @@ pub struct PolicyConfig {
     /// Path to the external decision-questions JSON file.
     #[serde(default = "default_questions_path")]
     pub questions_file: String,
-    /// Question id in that file holding the spam yes/no probability.
-    #[serde(default = "default_spam_q")]
-    pub spam_question: String,
+    /// Question id holding the spam yes/no probability. Omit to disable
+    /// spam enforcement entirely (the bot will warn at startup and idle).
+    #[serde(default = "default_spam_q_opt")]
+    pub spam_question: Option<String>,
     /// Question id holding the language-violation yes/no probability.
-    #[serde(default = "default_lang_q")]
-    pub language_question: String,
-    /// Question id holding the spam category choice.
-    #[serde(default = "default_cat_q")]
-    pub category_question: String,
+    /// Omit to disable language enforcement.
+    #[serde(default)]
+    pub language_question: Option<String>,
+    /// Question id holding the spam category choice. Omit if the policy
+    /// has no category question (category shows as unknown).
+    #[serde(default = "default_cat_q_opt")]
+    pub category_question: Option<String>,
     /// Spam score >= this triggers enforcement.
     #[serde(default = "default_spam_threshold")]
     pub spam_threshold: f64,
@@ -198,14 +201,11 @@ fn default_app_title() -> String {
 fn default_questions_path() -> String {
     "config/decision-questions.json".to_string()
 }
-fn default_spam_q() -> String {
-    "spam".to_string()
+fn default_spam_q_opt() -> Option<String> {
+    Some("spam".to_string())
 }
-fn default_lang_q() -> String {
-    "language_violation".to_string()
-}
-fn default_cat_q() -> String {
-    "spam_category".to_string()
+fn default_cat_q_opt() -> Option<String> {
+    Some("spam_category".to_string())
 }
 fn default_spam_threshold() -> f64 {
     0.9
@@ -270,9 +270,9 @@ impl Default for PolicyConfig {
     fn default() -> Self {
         Self {
             questions_file: default_questions_path(),
-            spam_question: default_spam_q(),
-            language_question: default_lang_q(),
-            category_question: default_cat_q(),
+            spam_question: default_spam_q_opt(),
+            language_question: None,
+            category_question: default_cat_q_opt(),
             spam_threshold: default_spam_threshold(),
             language_threshold: default_lang_threshold(),
             dry_run: false,

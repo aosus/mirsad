@@ -555,13 +555,23 @@ async fn handle_report(
     } else {
         Some(failures.join("; "))
     };
+    // Language numbers only mean something when a language question is
+    // configured; otherwise the report shows the check as disabled.
+    let (lang_score, lang_threshold) = match &state.config.policy.language_question {
+        Some(_) => (
+            Some(cls.language_score),
+            Some(state.config.policy.language_threshold),
+        ),
+        None => (None, None),
+    };
     let msg = diagnostic_message(
         &target_body,
         &target_id,
         &target_author,
         &cls,
         state.config.policy.spam_threshold,
-        state.config.policy.language_threshold,
+        lang_score,
+        lang_threshold,
         &trust_label,
         &prot_label,
         &history_label(&history_info),

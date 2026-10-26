@@ -13,7 +13,8 @@ pub fn diagnostic_message(
     author: &str,
     cls: &Classification,
     spam_threshold: f64,
-    language_threshold: f64,
+    language_score: Option<f64>,
+    language_threshold: Option<f64>,
     trust_label: &str,
     protection_label: &str,
     history_label: &str,
@@ -46,12 +47,22 @@ pub fn diagnostic_message(
         }
         _ => String::new(),
     };
+    let lang_line = match (language_score, language_threshold) {
+        (Some(s), Some(t)) => {
+            format!(
+                "Language violation: {:.1}% (threshold {:.0}%)",
+                s * 100.0,
+                t * 100.0
+            )
+        }
+        _ => "Language check: n/a (disabled)".to_string(),
+    };
     format!(
         "Mirsad report — {reported_event_id} by {author}\n\
          Evaluated: {snippet}\n\
          Model: {model}\n\
          Spam: {spam:.1}% (threshold {spam_th:.0}%)\n\
-         Language violation: {lang:.1}% (threshold {lang_th:.0}%)\n\
+         {lang_line}\n\
          {cat_line}\n\
          Trust: {trust_label} · Protection: {protection_label}\n\
          History: {history_label}\n\
@@ -61,8 +72,6 @@ pub fn diagnostic_message(
         model = cls.model,
         spam = cls.spam_score * 100.0,
         spam_th = spam_threshold * 100.0,
-        lang = cls.language_score * 100.0,
-        lang_th = language_threshold * 100.0,
         action = action_label(&decision.action),
         explanation = decision.explanation,
     )
@@ -120,7 +129,8 @@ mod tests {
             "@u:x",
             &cls,
             0.9,
-            0.9,
+            Some(0.1),
+            Some(0.9),
             "untrusted newcomer",
             "verified newcomer",
             "no prior room history",
@@ -132,6 +142,29 @@ mod tests {
         assert!(msg.contains("threshold 90%"));
         assert!(msg.contains("No action"));
         assert!(msg.contains("investment"));
+    }
+
+    #[test]
+    fn diagnostic_marks_disabled_language_check() {
+        let cls = Classification {
+            spam_score: 0.99,
+            language_score: 0.0,
+            category: "none".to_string(),
+            category_probs: HashMap::new(),
+            model: "m".to_string(),
+            raw: serde_json::json!({}),
+        };
+        let d = EnforcementDecision {
+            action: Action::DeleteBan,
+            explanation: "ban".to_string(),
+            spam_hit: true,
+            language_hit: false,
+        };
+        let msg = diagnostic_message(
+            "x", "$e", "@u:x", &cls, 0.9, None, None, "t", "p", "h", &d, false, None,
+        );
+        assert!(msg.contains("n/a (disabled)"));
+        assert!(!msg.contains("Language violation:"));
     }
 
     #[test]
@@ -151,7 +184,19 @@ mod tests {
             language_hit: false,
         };
         let clean = diagnostic_message(
-            "x", "$e", "@u:x", &cls, 0.9, 0.9, "t", "p", "h", &d, false, None,
+            "x",
+            "$e",
+            "@u:x",
+            &cls,
+            0.9,
+            Some(0.0),
+            Some(0.9),
+            "t",
+            "p",
+            "h",
+            &d,
+            false,
+            None,
         );
         assert!(!clean.contains("Enforcement incomplete"));
         let failed = diagnostic_message(
@@ -160,7 +205,8 @@ mod tests {
             "@u:x",
             &cls,
             0.9,
-            0.9,
+            Some(0.0),
+            Some(0.9),
             "t",
             "p",
             "h",

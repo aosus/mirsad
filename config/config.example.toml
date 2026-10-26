@@ -30,7 +30,9 @@ app_title = "mirsad"
 [policy]
 questions_file = "config/decision-questions.json"
 spam_question = "spam"
-language_question = "language_violation"
+# language_question is intentionally unset: language is not an enforcement
+# reason. Add language_question = "language_violation" (plus that question in
+# the policy file) to re-enable it — no rebuild needed.
 category_question = "spam_category"
 # Scores are 0..1 probabilities from the decision model.
 spam_threshold = 0.9

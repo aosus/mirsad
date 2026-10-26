@@ -19,15 +19,22 @@ fn example_configs_parse_and_agree() {
         serde_json::from_str(policy_text).expect("example questions parse");
     let questions = policy["questions"].as_object().expect("questions object");
 
-    // Configured question ids must exist in the policy file.
+    // Configured question ids must exist in the policy file. Roles left
+    // unconfigured (absent key) are disabled and need no question.
     for key in ["spam_question", "language_question", "category_question"] {
-        let cfg_q = cfg["policy"][key].as_str().unwrap();
+        let Some(cfg_q) = cfg["policy"].get(key).and_then(|v| v.as_str()) else {
+            continue;
+        };
         assert!(questions.contains_key(cfg_q), "missing question {cfg_q}");
     }
-    // Types must be what the bot expects.
+    // Types must be what the bot expects (when present).
     assert_eq!(questions["spam"]["type"], "noul");
-    assert_eq!(questions["language_violation"]["type"], "noul");
-    assert_eq!(questions["spam_category"]["type"], "choice");
+    if questions.get("language_violation").is_some() {
+        assert_eq!(questions["language_violation"]["type"], "noul");
+    }
+    if questions.get("spam_category").is_some() {
+        assert_eq!(questions["spam_category"]["type"], "choice");
+    }
 }
 
 #[test]
