@@ -779,7 +779,9 @@ async fn apply_enforcement(
                 error!("redact {event_id} failed: {e:#}");
                 failures.push(format!("message NOT deleted: {e:#}"));
             }
-            if matches!(decision.action, Action::DeleteWarn | Action::DeleteBan) {
+            // Warn only on the warn path: warning someone we are permanently
+            // banning in the same breath is contradictory noise.
+            if decision.action == Action::DeleteWarn {
                 if let Some(f) = warn_user(state, client, room, author, cls).await {
                     failures.push(f);
                 }
