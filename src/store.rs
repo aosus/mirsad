@@ -219,6 +219,25 @@ impl Store {
         Ok(u)
     }
 
+    /// Mark trust from visible room history (fast-track): the sender's own
+    /// prior events already meet the trust bar, so routine scanning stops now
+    /// instead of waiting for prospective counting alone.
+    pub fn mark_trusted_from_history(
+        &self,
+        user_id: &str,
+        activity_count: i64,
+        distinct_days: i64,
+        now_ts: i64,
+    ) -> Result<UserRow> {
+        let mut u = self.get_user(user_id)?;
+        u.activity_count = u.activity_count.max(activity_count);
+        u.distinct_days = u.distinct_days.max(distinct_days);
+        u.last_activity_ts = now_ts;
+        u.trusted = true;
+        self.upsert(&u)?;
+        Ok(u)
+    }
+
     /// Whether routine scanning applies right now.
     /// Trusted + recently active users are skipped; everyone else is scanned.
     /// Protection (no auto-permaban) is independent and never expires.
@@ -373,5 +392,26 @@ mod tests {
         assert!(s
             .check_and_mark_enforced("$e1", "!r:x", "@u:x", "ban")
             .unwrap());
+    }
+
+    #[test]
+    fn fast_track_trust_from_history() {
+        let (_d, s) = tmp_store();
+        // Newcomer with no record is not trusted...
+        assert!(!s.get_user("@v:example.org").unwrap().trusted);
+        // ...but visible history meeting the bar trusts them immediately.
+        let u = s
+            .mark_trusted_from_history("@v:example.org", 42, 5, 1_700_000_000)
+            .unwrap();
+        assert!(u.trusted);
+        assert_eq!(u.activity_count, 42);
+        assert_eq!(u.distinct_days, 5);
+        // Existing higher counters are never downgraded.
+        let u2 = s
+            .mark_trusted_from_history("@v:example.org", 3, 1, 1_700_000_100)
+            .unwrap();
+        assert!(u2.trusted);
+        assert_eq!(u2.activity_count, 42);
+        assert_eq!(u2.distinct_days, 5);
     }
 }

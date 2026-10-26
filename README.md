@@ -9,9 +9,9 @@ Mirsad watches configured rooms, asks an inexpensive **decision model** (via the
 - **Matrix-first.** One Matrix bot account moderates every bridged platform. Bans/redactions propagate through the bridge to Telegram.
 - **Prompt-defined behaviour.** The spam criteria live in `config/decision-questions.json`, sent verbatim as the Decisions-API `questions` with the message as `state`. The Rust code only thresholds the returned probabilities (`spam ≥ 0.9` → enforce). Retuning = edit JSON + restart.
 - **Two independent trust axes.**
-  - *Activity trust* (routine scanning on/off): ≥10 legit messages across ≥3 distinct days (configurable). Trusted-but-inactive-90-days resumes scanning.
-  - *Membership protection* (ban safety): only verified newcomers (join observed live after startup) can be auto-banned. Everyone else — baseline members, unknown history — is protected from automatic permanent bans forever.
-- **Exclusions.** `exclusions.user_ids` (exact or `prefix*`) skips admins/bots from scanning and punishment entirely.
+  - *Activity trust* (routine scanning on/off): ≥10 legit messages across ≥3 distinct days (configurable). If the sender's visible room history already meets that bar, trust is granted immediately (fast-track) instead of waiting for prospective counting. Trusted-but-inactive-90-days resumes scanning.
+  - *Membership protection* (ban safety): only verified newcomers (join observed after startup, or no visible history at all) can be auto-banned. Everyone else — baseline members, unknown history, or established activity — is protected from automatic permanent bans forever.
+- **Exclusions.** `exclusions.user_ids` (exact or `prefix*`) skips admins/bots/bridges, and room staff (moderators/admins/owners by Matrix power level, default ≥50) are skipped automatically — no listing needed.
 - **Rose stays authoritative** for Telegram warnings: Mirsad sends the configured warn command through the bridge and keeps no Telegram counters. Matrix-native warnings are counted locally for escalation.
 - **SQLite only.** Activity counters, trust/protection flags, enforcement ids (duplicate suppression), Matrix-native warns. No message history, no classification cache — every `/spam` report re-runs the model.
 

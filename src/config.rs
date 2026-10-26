@@ -122,12 +122,29 @@ pub struct TrustConfig {
     pub filler_min_chars: usize,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ExclusionsConfig {
     /// User IDs never auto-scanned / auto-punished (admins, bots, bridges).
     /// `*` matches any substring, e.g. `@admin:*` or `@bot*:aosus.org`.
     #[serde(default)]
     pub user_ids: Vec<String>,
+    /// Room staff (moderators/admins/owners by Matrix power level) are never
+    /// auto-scanned or auto-punished, no matter which room they act in.
+    #[serde(default = "default_true")]
+    pub skip_moderators: bool,
+    /// Minimum power level that counts as staff (50 = moderator by default).
+    #[serde(default = "default_mod_power_level")]
+    pub moderator_power_level: i64,
+}
+
+impl Default for ExclusionsConfig {
+    fn default() -> Self {
+        Self {
+            user_ids: Vec::new(),
+            skip_moderators: true,
+            moderator_power_level: 50,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -136,11 +153,19 @@ pub struct HistoryConfig {
     /// Resolves "unknown history" into newcomer/established before enforcing.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Trust fast-track: visible history already meeting the trust bar
+    /// (min_messages across min_days) earns activity trust immediately,
+    /// instead of waiting for prospective counting alone.
+    #[serde(default = "default_true")]
+    pub fast_track_trust: bool,
 }
 
 impl Default for HistoryConfig {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            fast_track_trust: true,
+        }
     }
 }
 
@@ -182,6 +207,9 @@ fn default_device_id() -> String {
 }
 fn default_true() -> bool {
     true
+}
+fn default_mod_power_level() -> i64 {
+    50
 }
 fn default_decider_url() -> String {
     "https://openrouter.ai/api/alpha/decisions".to_string()

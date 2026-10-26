@@ -89,7 +89,9 @@ impl DeciderClient {
     }
 
     /// Classify one message. `state` is the Decisions-API state object,
-    /// `questions` the verbatim value from the policy file.
+    /// `questions` the verbatim value from the policy file. Transient
+    /// rate-limit/server errors get one retry (honoring Retry-After) so a
+    /// busy minute doesn't silently drop a classification.
     pub async fn classify(
         &self,
         state: serde_json::Value,
@@ -100,30 +102,53 @@ impl DeciderClient {
             state,
             questions,
         };
-        let mut req = self
-            .http
-            .post(&self.base_url)
-            .bearer_auth(&self.api_key)
-            .header("Content-Type", "application/json")
-            .header("X-Title", &self.app_title);
-        if let Some(r) = &self.http_referer {
-            req = req.header("HTTP-Referer", r);
-        }
-        let resp = req
-            .json(&body)
-            .timeout(self.timeout)
-            .send()
-            .await
-            .context("sending Decisions request to OpenRouter")?;
-        let status = resp.status();
-        if !status.is_success() {
+        for attempt in 1..=2 {
+            let mut req = self
+                .http
+                .post(&self.base_url)
+                .bearer_auth(&self.api_key)
+                .header("Content-Type", "application/json")
+                .header("X-Title", &self.app_title);
+            if let Some(r) = &self.http_referer {
+                req = req.header("HTTP-Referer", r);
+            }
+            let resp = req
+                .json(&body)
+                .timeout(self.timeout)
+                .send()
+                .await
+                .context("sending Decisions request to OpenRouter")?;
+            let status = resp.status();
+            if status.is_success() {
+                let parsed: DecisionsResponse =
+                    resp.json().await.context("parsing Decisions response")?;
+                return Ok(parsed);
+            }
+            let retryable =
+                status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
+            if retryable && attempt == 1 {
+                let wait = resp
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .map(parse_retry_after_secs)
+                    .unwrap_or(2)
+                    .min(30);
+                tokio::time::sleep(Duration::from_secs(wait)).await;
+                continue;
+            }
             let text = resp.text().await.unwrap_or_default();
             let short = truncate(&text, 500);
             anyhow::bail!("OpenRouter Decisions API error {status}: {short}");
         }
-        let parsed: DecisionsResponse = resp.json().await.context("parsing Decisions response")?;
-        Ok(parsed)
+        unreachable!("retry loop always returns")
     }
+}
+
+/// Seconds to wait from a Retry-After header value (delta-seconds; anything
+/// else falls back to 2s). Pure and unit-tested.
+fn parse_retry_after_secs(value: &str) -> u64 {
+    value.trim().parse::<u64>().unwrap_or(2).clamp(1, 30)
 }
 
 /// Simplified classification outcome used by the enforcement engine.
@@ -255,6 +280,16 @@ mod tests {
     fn state_truncates_long_messages() {
         let s = message_state(&"x".repeat(5000), "@a:b", "!r:b", 100);
         assert!(s["message"].as_str().unwrap().len() <= 100);
+    }
+
+    #[test]
+    fn retry_after_parsing() {
+        assert_eq!(parse_retry_after_secs("1"), 1);
+        assert_eq!(parse_retry_after_secs("  10 "), 10);
+        assert_eq!(parse_retry_after_secs("9999"), 30);
+        assert_eq!(parse_retry_after_secs("0"), 1);
+        assert_eq!(parse_retry_after_secs("soon"), 2);
+        assert_eq!(parse_retry_after_secs(""), 2);
     }
 
     // Live HTTP test against a mock server (wiremock), not the real API.

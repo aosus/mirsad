@@ -29,6 +29,7 @@ use matrix_sdk::{
             message::{
                 MessageType, OriginalSyncRoomMessageEvent, Relation, RoomMessageEventContent,
             },
+            power_levels::RoomPowerLevelsEventContent,
         },
         OwnedEventId, OwnedUserId, UInt,
     },
@@ -48,6 +49,15 @@ use crate::{
     store::Store,
 };
 
+/// Cached room power levels: explicit user entries plus the room default,
+/// refreshed hourly. Users absent from `users` fall back to `users_default`.
+#[derive(Debug, Clone)]
+pub struct PowerEntry {
+    pub checked_ts: i64,
+    pub users: HashMap<String, i64>,
+    pub users_default: i64,
+}
+
 pub struct AppState {
     pub config: AppConfig,
     pub questions: serde_json::Value,
@@ -59,6 +69,8 @@ pub struct AppState {
     pub reports: Mutex<HashMap<String, Vec<Instant>>>,
     /// Suspect history verdicts per room|user, with check timestamp (24h TTL).
     pub history_cache: Mutex<HashMap<String, (i64, HistoryInfo)>>,
+    /// Room power maps per room id, with fetch timestamp (1h TTL).
+    pub power_cache: Mutex<HashMap<String, PowerEntry>>,
     pub live: AtomicBool,
 }
 
@@ -321,6 +333,15 @@ async fn on_message(
     if state.config.is_excluded(&sender) {
         return;
     }
+    // Room staff (moderators/admins/owners by power level) are never scanned.
+    if state.config.exclusions.skip_moderators {
+        if let Some(pl) = room_staff_level(&state, &room, &sender).await {
+            if pl >= state.config.exclusions.moderator_power_level {
+                return;
+            }
+        }
+        // Power levels unreadable: fall through to scanning (fail-closed).
+    }
     note_first_sighting(&state, &sender);
     // Replies to our own messages (reports, warnings, notices) are conversation
     // about moderation, not new community content: never analyze them. Without
@@ -332,6 +353,11 @@ async fn on_message(
             }
         }
         // Fetch failed: fall through to normal scanning (fail-closed for spam).
+    }
+    // History fast-track: visible history already meeting the trust bar earns
+    // trust immediately, so established actives stop being scanned at all.
+    if state.config.history.fast_track_trust {
+        ensure_trust_from_history(&state, &room, &sender).await;
     }
     let now = chrono::Utc::now().timestamp();
     let needs = state
@@ -606,36 +632,118 @@ async fn resolve_protection(
     if !state.config.history.enabled {
         return (true, HistoryInfo::default());
     }
+    let info = history_verdict_cached(state, room, sender).await;
+    let established = matches!(info.verdict, Some(HistoryVerdict::Established));
+    let inconclusive = info.verdict.is_none();
+    (established || (inconclusive && row_protected), info)
+}
+
+/// Shared cached history verdict per room+sender (24h TTL). Used both to
+/// resolve protection for spam-flagged unknowns and to fast-track trust for
+/// established actives. Lookup failures and disabled checks yield an empty
+/// (verdict-less) info, which callers treat conservatively.
+async fn history_verdict_cached(state: &AppState, room: &Room, sender: &str) -> HistoryInfo {
     let key = format!("{}|{sender}", room.room_id());
     if let Some(info) = get_cached_history(state, &key).await {
-        return (
-            matches!(info.verdict, Some(HistoryVerdict::Established)),
-            info,
-        );
+        return info;
     }
-    let info = match check_sender_history(room, sender).await {
+    let mut info = match check_sender_history(room, sender).await {
         Ok(info) => info,
         Err(e) => {
-            warn!("sender history check failed for {sender}: {e:#}; staying protected");
-            return (true, HistoryInfo::default());
+            warn!("sender history check failed for {sender}: {e:#}");
+            return HistoryInfo::default();
         }
     };
-    let verdict = decide_verdict(
+    info.verdict = Some(decide_verdict(
         info.prior_events,
         info.distinct_days,
         state.config.trust.min_messages,
         state.config.trust.min_days,
-    );
-    let info = HistoryInfo {
-        verdict: Some(verdict),
-        ..info
-    };
+    ));
     state
         .history_cache
         .lock()
         .await
         .insert(key, (chrono::Utc::now().timestamp(), info.clone()));
-    (matches!(verdict, HistoryVerdict::Established), info)
+    info
+}
+
+/// Trust fast-track: if the sender's visible history already meets the trust
+/// bar, mark them trusted now so routine scanning stops — no need to wait for
+/// prospective counting alone. No-op for already-trusted users.
+async fn ensure_trust_from_history(state: &AppState, room: &Room, sender: &str) {
+    let already = state
+        .store
+        .get_user(sender)
+        .map(|u| u.trusted)
+        .unwrap_or(false);
+    if already {
+        return;
+    }
+    let info = history_verdict_cached(state, room, sender).await;
+    if !matches!(info.verdict, Some(HistoryVerdict::Established)) {
+        return;
+    }
+    let now = chrono::Utc::now().timestamp();
+    match state.store.mark_trusted_from_history(
+        sender,
+        info.prior_events as i64,
+        info.distinct_days as i64,
+        now,
+    ) {
+        Ok(_) => info!(
+            "{sender} fast-tracked to trusted from room history ({} messages, {} days)",
+            info.prior_events, info.distinct_days
+        ),
+        Err(e) => warn!("fast-track trust bookkeeping failed for {sender}: {e:#}"),
+    }
+}
+
+/// Effective power level of `sender` in `room` (explicit entry, else the
+/// room's users_default, else 0). Power maps are cached per room for 1h.
+/// Returns None when the power levels can't be read (fail-closed: scan).
+async fn room_staff_level(state: &AppState, room: &Room, sender: &str) -> Option<i64> {
+    let room_id = room.room_id().to_string();
+    {
+        let cache = state.power_cache.lock().await;
+        if let Some(entry) = cache.get(&room_id) {
+            if chrono::Utc::now().timestamp() - entry.checked_ts < 3600 {
+                return Some(
+                    entry
+                        .users
+                        .get(sender)
+                        .copied()
+                        .unwrap_or(entry.users_default),
+                );
+            }
+        }
+    }
+    let raw = room
+        .get_state_event_static::<RoomPowerLevelsEventContent>()
+        .await
+        .ok()??;
+    let v = serde_json::to_value(&raw).ok()?;
+    let content = v.get("content")?;
+    let mut map = HashMap::new();
+    if let Some(users) = content.get("users").and_then(|u| u.as_object()) {
+        for (uid, lvl) in users {
+            map.insert(uid.clone(), lvl.as_i64().unwrap_or(0));
+        }
+    }
+    let def = content
+        .get("users_default")
+        .and_then(|d| d.as_i64())
+        .unwrap_or(0);
+    let level = map.get(sender).copied().unwrap_or(def);
+    state.power_cache.lock().await.insert(
+        room_id,
+        PowerEntry {
+            checked_ts: chrono::Utc::now().timestamp(),
+            users: map,
+            users_default: def,
+        },
+    );
+    Some(level)
 }
 
 async fn get_cached_history(state: &AppState, key: &str) -> Option<HistoryInfo> {

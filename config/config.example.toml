@@ -54,12 +54,22 @@ filler_min_chars = 5
 user_ids = [
   "@admin:aosus.org",
 ]
+# Room staff (moderators/admins/owners by Matrix power level) are never
+# auto-scanned or auto-punished either, without needing to list them above.
+skip_moderators = true
+moderator_power_level = 50
 
 [history]
 # Suspect-triggered sender history check: when spam scores high but membership
 # history is unknown, look up the sender's own recent room events (server-side
 # filter, one cheap request). No visible history → treat as newcomer.
 enabled = true
+# Trust fast-track: visible history already meeting the trust bar earns
+# activity trust immediately, so established actives stop being scanned.
+# (Matrix rooms only expose history from the bot's own join date onward —
+# history_visibility=shared or world_readable — so nobody can fast-track on
+# older activity the bot was never allowed to see.)
+fast_track_trust = true
 
 [rose]
 enabled = false
