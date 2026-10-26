@@ -485,15 +485,9 @@ async fn handle_report(
     // Never analyze our own messages: a reply to one of our reports, warnings
     // or diagnostics would otherwise make us classify our own output (and the
     // diagnostic text quotes the original spam, guaranteeing nonsense).
+    // Such reports are ignored silently — no analysis, no reply.
     let own_id = client.user_id().map(|u| u.to_string()).unwrap_or_default();
     if !own_id.is_empty() && target_author == own_id {
-        let _ = room
-            .send(
-                matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(
-                    crate::report::own_message_response(),
-                ),
-            )
-            .await;
         return;
     }
 
