@@ -228,6 +228,59 @@ pub fn message_state(
     })
 }
 
+/// An image downloaded from Matrix, ready to embed in Decisions-API `state`.
+#[derive(Debug, Clone)]
+pub struct ImageAttachment {
+    pub bytes: Vec<u8>,
+    pub mime: String,
+}
+
+/// Guess the MIME type from a filename extension. Defaults to JPEG (the most
+/// common photo format) when unknown.
+pub fn guess_mime(filename: &str) -> String {
+    let lower = filename.rsplit('.').next().unwrap_or("").to_lowercase();
+    match lower.as_str() {
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "jpg" | "jpeg" | "jpe" | "jfif" => "image/jpeg",
+        _ => "image/jpeg",
+    }
+    .to_string()
+}
+
+/// Build the `state` object for a message with an attached image. The text
+/// goes in `message` exactly as in the text-only shape; the image is embedded
+/// as an OpenAI-style `image_url` part under the `image` key, which is where
+/// policy questions should look for it.
+///
+/// State contract (for policy authors): `message` = text/caption/filename,
+/// `author`, `room`, and — only for messages with a photo — `image`.
+pub fn message_state_with_image(
+    body: &str,
+    author: &str,
+    room_id: &str,
+    max_chars: usize,
+    image: &ImageAttachment,
+) -> serde_json::Value {
+    let mut text = body.to_string();
+    if text.len() > max_chars {
+        text.truncate(max_chars);
+    }
+    let data_url = format!(
+        "data:{};base64,{}",
+        image.mime,
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &image.bytes)
+    );
+    serde_json::json!({
+        "message": text,
+        "author": author,
+        "room": room_id,
+        "image": {"type": "image_url", "image_url": {"url": data_url}},
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,6 +333,29 @@ mod tests {
     fn state_truncates_long_messages() {
         let s = message_state(&"x".repeat(5000), "@a:b", "!r:b", 100);
         assert!(s["message"].as_str().unwrap().len() <= 100);
+    }
+
+    #[test]
+    fn mime_guess_from_extension() {
+        assert_eq!(guess_mime("photo.JPG"), "image/jpeg");
+        assert_eq!(guess_mime("shot.png"), "image/png");
+        assert_eq!(guess_mime("anim.gif"), "image/gif");
+        assert_eq!(guess_mime("pic.webp"), "image/webp");
+        assert_eq!(guess_mime("noext"), "image/jpeg");
+    }
+
+    #[test]
+    fn image_state_embeds_decisions_image_part() {
+        let img = ImageAttachment {
+            bytes: vec![0xFF, 0xD8, 0xFF],
+            mime: "image/jpeg".to_string(),
+        };
+        let s = message_state_with_image("look at this", "@a:b", "!r:b", 4000, &img);
+        assert_eq!(s["message"], "look at this");
+        assert_eq!(s["author"], "@a:b");
+        assert_eq!(s["image"]["type"], "image_url");
+        let url = s["image"]["image_url"]["url"].as_str().unwrap();
+        assert!(url.starts_with("data:image/jpeg;base64,"));
     }
 
     #[test]

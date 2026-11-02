@@ -70,6 +70,14 @@ pub struct DeciderConfig {
     /// Max message chars sent to the model.
     #[serde(default = "default_max_chars")]
     pub max_chars: usize,
+    /// Download images from image messages and send them to the decision
+    /// model alongside the text (Decider v1.2 is multimodal).
+    #[serde(default = "default_true")]
+    pub images_enabled: bool,
+    /// Largest image download accepted (bytes); bigger files fall back to
+    /// text-only classification.
+    #[serde(default = "default_max_image_bytes")]
+    pub max_image_bytes: usize,
     /// Optional HTTP referer / title for OpenRouter rankings.
     #[serde(default)]
     pub http_referer: Option<String>,
@@ -223,6 +231,9 @@ fn default_timeout_secs() -> u64 {
 fn default_max_chars() -> usize {
     4000
 }
+fn default_max_image_bytes() -> usize {
+    6 * 1024 * 1024
+}
 fn default_app_title() -> String {
     "mirsad".to_string()
 }
@@ -289,6 +300,8 @@ impl Default for DeciderConfig {
             model: default_model(),
             timeout_secs: default_timeout_secs(),
             max_chars: default_max_chars(),
+            images_enabled: true,
+            max_image_bytes: default_max_image_bytes(),
             http_referer: None,
             app_title: default_app_title(),
         }

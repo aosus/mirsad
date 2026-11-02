@@ -22,6 +22,7 @@ use matrix_sdk::{
     authentication::matrix::MatrixSession,
     config::SyncSettings,
     event_handler::Ctx,
+    media::{MediaFormat, MediaRequestParameters},
     room::MessagesOptions,
     ruma::{
         events::room::{
@@ -30,8 +31,9 @@ use matrix_sdk::{
                 MessageType, OriginalSyncRoomMessageEvent, Relation, RoomMessageEventContent,
             },
             power_levels::RoomPowerLevelsEventContent,
+            MediaSource,
         },
-        OwnedEventId, OwnedUserId, UInt,
+        OwnedEventId, OwnedMxcUri, OwnedUserId, UInt,
     },
     store::RoomLoadSettings,
     Client, Room, RoomState,
@@ -41,7 +43,10 @@ use tracing::{error, info, warn};
 
 use crate::{
     config::{AppConfig, Secrets},
-    decider::{message_state, Classification, DeciderClient},
+    decider::{
+        guess_mime, message_state, message_state_with_image, Classification, DeciderClient,
+        ImageAttachment,
+    },
     enforcement::{decide, Action, EnforcementInput},
     history::{check_sender_history, decide_verdict, history_label, HistoryInfo, HistoryVerdict},
     report::diagnostic_message,
@@ -316,11 +321,15 @@ async fn on_message(
     if sender == own_id {
         return;
     }
-    let MessageType::Text(text) = ev.content.msgtype.clone() else {
-        return;
+    // Text and photo messages are scanned; anything else is ignored.
+    // For photos the body is usually just the filename — the image itself is
+    // the signal, downloaded below when image support is enabled.
+    let (body, image_source) = match ev.content.msgtype.clone() {
+        MessageType::Text(text) => (text.body.trim().to_string(), None),
+        MessageType::Image(img) => (img.body.trim().to_string(), Some((img.source, img.body))),
+        _ => return,
     };
-    let body = text.body.trim().to_string();
-    if body.is_empty() {
+    if body.is_empty() && image_source.is_none() {
         return;
     }
 
@@ -368,7 +377,25 @@ async fn on_message(
         return;
     }
 
-    match classify_message(&state, &body, &sender, &room_id).await {
+    // Photos: download the image so the decision model sees it, not just the
+    // filename. Download failures fall back to text-only classification.
+    if image_source.is_some() && !state.config.decider.images_enabled {
+        return;
+    }
+    let image = match image_source {
+        Some((source, filename)) => {
+            fetch_image(
+                &client,
+                &source,
+                &filename,
+                state.config.decider.max_image_bytes,
+            )
+            .await
+        }
+        None => None,
+    };
+
+    match classify_message(&state, &body, &sender, &room_id, image.as_ref()).await {
         Ok(cls) => {
             let row = state
                 .store
@@ -493,8 +520,8 @@ async fn handle_report(
         return;
     };
     let _ = body;
-    // Fetch the reported event's body + author.
-    let (target_body, target_author) = match fetch_event_text(&room, &target_id).await {
+    // Fetch the reported event's body + author (+ image for photo messages).
+    let reported = match fetch_event_text(&room, &target_id).await {
         Ok(v) => v,
         Err(e) => {
             let _ = room
@@ -507,6 +534,8 @@ async fn handle_report(
             return;
         }
     };
+    let target_body = reported.body;
+    let target_author = reported.sender;
 
     // Never analyze our own messages: a reply to one of our reports, warnings
     // or diagnostics would otherwise make us classify our own output (and the
@@ -517,9 +546,31 @@ async fn handle_report(
         return;
     }
 
-    // FRESH classification, ignoring trust/cache.
+    // FRESH classification, ignoring trust/cache. Photo reports include the
+    // image itself, not just the filename.
     let room_id = room.room_id().to_string();
-    let cls = match classify_message(&state, &target_body, &target_author, &room_id).await {
+    let image = match reported.image {
+        Some((mxc, ref filename)) if state.config.decider.images_enabled => {
+            let uri: OwnedMxcUri = mxc.as_str().into();
+            fetch_image(
+                &client,
+                &MediaSource::Plain(uri),
+                filename,
+                state.config.decider.max_image_bytes,
+            )
+            .await
+        }
+        _ => None,
+    };
+    let cls = match classify_message(
+        &state,
+        &target_body,
+        &target_author,
+        &room_id,
+        image.as_ref(),
+    )
+    .await
+    {
         Ok(c) => c,
         Err(e) => {
             let _ = room.send(matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(
@@ -590,8 +641,13 @@ async fn handle_report(
         ),
         None => (None, None),
     };
+    let evaluated = if image.is_some() {
+        format!("{target_body} [photo attached and analyzed]")
+    } else {
+        target_body.clone()
+    };
     let msg = diagnostic_message(
-        &target_body,
+        &evaluated,
         &target_id,
         &target_author,
         &cls,
@@ -774,8 +830,14 @@ async fn classify_message(
     body: &str,
     author: &str,
     room_id: &str,
+    image: Option<&ImageAttachment>,
 ) -> Result<Classification> {
-    let st = message_state(body, author, room_id, state.config.decider.max_chars);
+    let st = match image {
+        Some(img) => {
+            message_state_with_image(body, author, room_id, state.config.decider.max_chars, img)
+        }
+        None => message_state(body, author, room_id, state.config.decider.max_chars),
+    };
     let resp = state
         .decider
         .classify(st.clone(), state.questions.clone())
@@ -789,6 +851,60 @@ async fn classify_message(
         &state.cat_q,
         state.decider.model(),
     ))
+}
+
+/// Download an image message's media for vision classification.
+/// Returns None for encrypted media, oversized files, or any failure —
+/// callers fall back to text-only classification.
+async fn fetch_image(
+    client: &Client,
+    source: &MediaSource,
+    filename: &str,
+    max_bytes: usize,
+) -> Option<ImageAttachment> {
+    let mxc = match source {
+        MediaSource::Plain(uri) => uri,
+        MediaSource::Encrypted(_) => {
+            warn!("skipping encrypted image {filename}: thumbnails of E2EE media not supported");
+            return None;
+        }
+    };
+    let bytes = match tokio::time::timeout(
+        Duration::from_secs(30),
+        client.media().get_media_content(
+            &MediaRequestParameters {
+                source: MediaSource::Plain(mxc.clone()),
+                format: MediaFormat::File,
+            },
+            true,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(e)) => {
+            warn!("image download failed for {filename}: {e:#}");
+            return None;
+        }
+        Err(_) => {
+            warn!("image download timed out for {filename}");
+            return None;
+        }
+    };
+    if bytes.len() > max_bytes {
+        warn!(
+            "image {filename} too large ({} bytes > {max_bytes}), classifying text only",
+            bytes.len()
+        );
+        return None;
+    }
+    if bytes.is_empty() {
+        return None;
+    }
+    Some(ImageAttachment {
+        bytes,
+        mime: guess_mime(filename),
+    })
 }
 
 /// The event id this message replies to, if any.
@@ -814,7 +930,15 @@ async fn fetch_event_sender(room: &Room, event_id: &str) -> Result<String> {
         .to_string())
 }
 
-async fn fetch_event_text(room: &Room, event_id: &str) -> Result<(String, String)> {
+/// A fetched reported event: readable text, sender, and — for photo messages —
+/// the MXC uri + filename so the image itself can be classified.
+struct ReportedEvent {
+    body: String,
+    sender: String,
+    image: Option<(String, String)>,
+}
+
+async fn fetch_event_text(room: &Room, event_id: &str) -> Result<ReportedEvent> {
     let owned: OwnedEventId = event_id
         .try_into()
         .map_err(|e| anyhow::anyhow!("bad event id: {e}"))?;
@@ -836,7 +960,21 @@ async fn fetch_event_text(room: &Room, event_id: &str) -> Result<(String, String
     if body.is_empty() {
         anyhow::bail!("reported event has no readable text body");
     }
-    Ok((body, sender))
+    // Photo messages: capture the MXC uri so the image itself is classified,
+    // not just the filename. Encrypted media (content.file) is skipped.
+    let image = v
+        .pointer("/content/msgtype")
+        .and_then(|t| t.as_str())
+        .filter(|t| *t == "m.image")
+        .and_then(|_| v.pointer("/content/url"))
+        .and_then(|u| u.as_str())
+        .filter(|u| u.starts_with("mxc://"))
+        .map(|u| (u.to_string(), body.clone()));
+    Ok(ReportedEvent {
+        body,
+        sender,
+        image,
+    })
 }
 
 /// Apply the enforcement decision. Returns a list of human-readable failure

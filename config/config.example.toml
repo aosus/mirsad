@@ -23,6 +23,12 @@ base_url = "https://openrouter.ai/api/alpha/decisions"
 model = "perplexity/pplx-decider-v1.2"
 timeout_secs = 30
 max_chars = 4000
+# Vision: image messages are downloaded and sent to the decision model
+# alongside the text (Decider v1.2 is multimodal). State shape for policy
+# authors: {message, author, room} plus an `image` image_url part when a
+# photo is attached.
+images_enabled = true
+max_image_bytes = 6291456
 # Optional rankings headers.
 # http_referer = "https://aosus.org"
 app_title = "mirsad"
