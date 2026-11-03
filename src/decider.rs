@@ -250,13 +250,15 @@ pub fn guess_mime(filename: &str) -> String {
     .to_string()
 }
 
-/// Build the `state` object for a message with an attached image. The text
-/// goes in `message` exactly as in the text-only shape; the image is embedded
-/// as an OpenAI-style `image_url` part under the `image` key, which is where
-/// policy questions should look for it.
+/// Build the `state` for a message with an attached image. Per the Decisions
+/// API contract, image parts must be TOP-LEVEL items of the `state` array —
+/// a nested image part is rejected (or read as text). The text goes first as
+/// a plain object, the image second, so the model reads the caption and then
+/// sees the photo.
 ///
-/// State contract (for policy authors): `message` = text/caption/filename,
-/// `author`, `room`, and — only for messages with a photo — `image`.
+/// State contract (for policy authors): text-only messages send
+/// `{message, author, room}`; photo messages send
+/// `[{message, author, room}, {type: "image_url", ...}]`.
 pub fn message_state_with_image(
     body: &str,
     author: &str,
@@ -273,12 +275,10 @@ pub fn message_state_with_image(
         image.mime,
         base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &image.bytes)
     );
-    serde_json::json!({
-        "message": text,
-        "author": author,
-        "room": room_id,
-        "image": {"type": "image_url", "image_url": {"url": data_url}},
-    })
+    serde_json::json!([
+        {"message": text, "author": author, "room": room_id},
+        {"type": "image_url", "image_url": {"url": data_url}},
+    ])
 }
 
 #[cfg(test)]
@@ -351,10 +351,12 @@ mod tests {
             mime: "image/jpeg".to_string(),
         };
         let s = message_state_with_image("look at this", "@a:b", "!r:b", 4000, &img);
-        assert_eq!(s["message"], "look at this");
-        assert_eq!(s["author"], "@a:b");
-        assert_eq!(s["image"]["type"], "image_url");
-        let url = s["image"]["image_url"]["url"].as_str().unwrap();
+        // Top-level array: text object first, image part second (API contract).
+        assert!(s.is_array());
+        assert_eq!(s[0]["message"], "look at this");
+        assert_eq!(s[0]["author"], "@a:b");
+        assert_eq!(s[1]["type"], "image_url");
+        let url = s[1]["image_url"]["url"].as_str().unwrap();
         assert!(url.starts_with("data:image/jpeg;base64,"));
     }
 
