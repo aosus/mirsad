@@ -11,7 +11,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicI64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -76,6 +76,9 @@ pub struct AppState {
     pub history_cache: Mutex<HashMap<String, (i64, HistoryInfo)>>,
     /// Room power maps per room id, with fetch timestamp (1h TTL).
     pub power_cache: Mutex<HashMap<String, PowerEntry>>,
+    /// Unix timestamp of the last sync response (success or failure), for the
+    /// liveness watchdog. 0 = no response seen yet.
+    pub last_sync_ts: AtomicI64,
     pub live: AtomicBool,
 }
 
@@ -211,8 +214,32 @@ pub async fn run(client: Client, state: Arc<AppState>) -> Result<()> {
 
     info!("starting sync loop");
     let settings = SyncSettings::default().token(sync_once.next_batch);
+    // Liveness watchdog: every sync response (success or failure) stamps
+    // last_sync_ts. If the loop ever wedges silently — no response for over
+    // 5 minutes while long-polls return at least every ~30s — exit so the
+    // restart policy recovers instead of idling forever.
+    {
+        let s = state.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                let last = s.last_sync_ts.load(Ordering::SeqCst);
+                if last > 0 && chrono::Utc::now().timestamp() - last > 300 {
+                    error!("no sync response for over 5 minutes; exiting to trigger restart");
+                    std::process::exit(1);
+                }
+            }
+        });
+    }
+    let cb_state = state.clone();
     tokio::select! {
-        r = client.sync(settings) => {
+        r = client.sync_with_result_callback(settings, |_result| {
+            let s = cb_state.clone();
+            async move {
+                s.last_sync_ts.store(chrono::Utc::now().timestamp(), Ordering::SeqCst);
+                Ok(matrix_sdk::LoopCtrl::Continue)
+            }
+        }) => {
             r.context("Matrix sync failed")?;
         }
         _ = tokio::signal::ctrl_c() => {
@@ -268,20 +295,30 @@ async fn handle_invite(ev: StrippedRoomMemberEvent, client: Client, room: Room) 
         return;
     }
     info!("auto-joining {}", room.room_id());
+    // Bounded retries: a persistently failing join (stale/withdrawn invite)
+    // must not spin forever. After ~9 minutes we give up loudly; a fresh
+    // invite from an admin re-triggers the handler.
     let mut delay = 2u64;
-    loop {
+    for attempt in 1..=8 {
         match room.join().await {
             Ok(_) => {
                 info!("joined {}", room.room_id());
-                break;
+                return;
             }
             Err(e) => {
-                warn!("join {} failed ({e}); retry in {delay}s", room.room_id());
+                warn!(
+                    "join {} failed, attempt {attempt}/8 ({e}); retry in {delay}s",
+                    room.room_id()
+                );
                 tokio::time::sleep(Duration::from_secs(delay)).await;
-                delay = (delay * 2).min(3600);
+                delay *= 2;
             }
         }
     }
+    error!(
+        "giving up joining {} after 8 attempts; ask an admin to re-invite the bot",
+        room.room_id()
+    );
 }
 
 async fn handle_member(ev: OriginalSyncRoomMemberEvent, _room: Room, ctx: Ctx<Arc<AppState>>) {

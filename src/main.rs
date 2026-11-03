@@ -102,6 +102,7 @@ async fn main() -> Result<()> {
         reports: Mutex::new(HashMap::new()),
         history_cache: Mutex::new(HashMap::new()),
         power_cache: Mutex::new(HashMap::new()),
+        last_sync_ts: std::sync::atomic::AtomicI64::new(0),
         live: std::sync::atomic::AtomicBool::new(false),
     });
 
