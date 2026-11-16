@@ -47,7 +47,7 @@ use crate::{
         guess_mime, message_state, message_state_with_image, Classification, DeciderClient,
         ImageAttachment,
     },
-    enforcement::{decide, Action, EnforcementInput},
+    enforcement::{decide, Action, EnforcementInput, Protection},
     history::{check_sender_history, decide_verdict, history_label, HistoryInfo, HistoryVerdict},
     report::diagnostic_message,
     rose::{build_warn_command, is_bridged_telegram, language_reason, spam_reason},
@@ -443,14 +443,16 @@ async fn on_message(
                 });
             let excluded = state.config.is_excluded(&sender);
             let spam_hit = cls.spam_score >= state.config.policy.spam_threshold;
-            let (effective_protected, _history) = resolve_protection(
+            // Anything that could lead to a ban gets the history check.
+            let risky = spam_hit || cls.language_score >= state.config.policy.language_threshold;
+            let (protection, _history) = resolve_protection(
                 &state,
                 &room,
                 &sender,
                 row.protected,
+                row.trusted,
                 row.baseline_seen,
-                row.verified_newcomer,
-                spam_hit,
+                risky,
             )
             .await;
             let decision = decide(EnforcementInput {
@@ -458,7 +460,7 @@ async fn on_message(
                 spam_threshold: state.config.policy.spam_threshold,
                 language_threshold: state.config.policy.language_threshold,
                 language_action: &state.config.policy.language_action,
-                protected: effective_protected,
+                protection,
                 excluded,
                 dry_run: state.config.policy.dry_run,
                 prior_warns: row.matrix_warns,
@@ -624,14 +626,17 @@ async fn handle_report(
             ..Default::default()
         });
     let spam_hit = cls.spam_score >= state.config.policy.spam_threshold;
-    let (effective_protected, history_info) = resolve_protection(
+    // A report can target a long-standing member: verify history before any
+    // ban decision instead of trusting the stored newcomer flag.
+    let risky = spam_hit || cls.language_score >= state.config.policy.language_threshold;
+    let (protection, history_info) = resolve_protection(
         &state,
         &room,
         &target_author,
         row.protected,
+        row.trusted,
         row.baseline_seen,
-        row.verified_newcomer,
-        spam_hit,
+        risky,
     )
     .await;
     let decision = decide(EnforcementInput {
@@ -639,7 +644,7 @@ async fn handle_report(
         spam_threshold: state.config.policy.spam_threshold,
         language_threshold: state.config.policy.language_threshold,
         language_action: &state.config.policy.language_action,
-        protected: effective_protected,
+        protection,
         excluded: state.config.is_excluded(&target_author),
         dry_run: state.config.policy.dry_run,
         prior_warns: row.matrix_warns,
@@ -658,11 +663,21 @@ async fn handle_report(
         )
         .await;
     }
-    let (trust_label, prot_label) = state.trust_labels_inner(&target_author);
-    let prot_label = if !effective_protected && row.protected {
-        "newcomer (insufficient room history)".to_string()
+    let (trust_label, stored_prot_label) = state.trust_labels_inner(&target_author);
+    let prot_label = if !decision.spam_hit && !decision.language_hit {
+        "not checked (no violation)".to_string()
     } else {
-        prot_label
+        match protection {
+            Protection::Protected => {
+                if row.protected {
+                    stored_prot_label
+                } else {
+                    "protected (history meets the trust bar)".to_string()
+                }
+            }
+            Protection::Newcomer => "verified newcomer (history below the trust bar)".to_string(),
+            Protection::Unverified => "unverified history — moderator review required".to_string(),
+        }
     };
     let outcome = if duplicate || failures.is_empty() {
         None
@@ -703,32 +718,68 @@ async fn handle_report(
         .await;
 }
 
-/// Resolve effective ban-protection for a spam-flagged sender.
+/// Resolve ban-eligibility for a sender whose message tripped a threshold.
 ///
-/// Verified newcomers are ban-eligible; baseline/established members stay
-/// protected. For unknown-history senders, one server-filtered history lookup
-/// decides: no visible prior events → newcomer; anything found, a disabled
-/// check, or any lookup failure → protected. Verdicts cache per room+sender
-/// for 24h so repeat offenders cost one lookup a day.
+/// Trusted/baseline senders are protected outright. Everyone else who could
+/// be banned is verified against their OWN room history first: a ban requires
+/// positive evidence that they are a newcomer (history below the trust bar).
+/// If the DB says "newcomer" but history already meets the bar, history wins.
+/// If history cannot be checked, the sender is `Unverified` and the caller
+/// asks a moderator instead of banning.
 async fn resolve_protection(
     state: &AppState,
     room: &Room,
     sender: &str,
     row_protected: bool,
+    trusted: bool,
     baseline_seen: bool,
-    verified_newcomer: bool,
-    spam_hit: bool,
-) -> (bool, HistoryInfo) {
-    if !spam_hit || !row_protected || baseline_seen || verified_newcomer {
-        return (row_protected, HistoryInfo::default());
+    risky: bool,
+) -> (Protection, HistoryInfo) {
+    if !risky || trusted || baseline_seen {
+        return (
+            protection_verdict(row_protected, trusted, baseline_seen, risky, None),
+            HistoryInfo::default(),
+        );
     }
-    if !state.config.history.enabled {
-        return (true, HistoryInfo::default());
+    // Never ban on the stored flag alone. Ban candidates get a FRESH history
+    // check (a 24h cache could predate a bridge backfill); unknown-history
+    // senders may reuse the cache because the trust bar cannot be newly met
+    // within a day.
+    let info = history_verdict(state, room, sender, row_protected).await;
+    (
+        protection_verdict(row_protected, trusted, baseline_seen, risky, info.verdict),
+        info,
+    )
+}
+
+/// Pure protection decision: the sender's own history outranks the stored
+/// newcomer flag. An "Established" verdict always protects; an `Unverified`
+/// ban candidate is routed to moderators, never banned.
+fn protection_verdict(
+    row_protected: bool,
+    trusted: bool,
+    baseline_seen: bool,
+    risky: bool,
+    verdict: Option<HistoryVerdict>,
+) -> Protection {
+    if !risky {
+        // No threshold tripped: there is no ban path to protect against.
+        return Protection::Protected;
     }
-    let info = history_verdict_cached(state, room, sender).await;
-    let established = matches!(info.verdict, Some(HistoryVerdict::Established));
-    let inconclusive = info.verdict.is_none();
-    (established || (inconclusive && row_protected), info)
+    if trusted || baseline_seen {
+        return Protection::Protected;
+    }
+    match verdict {
+        Some(HistoryVerdict::Established) => Protection::Protected,
+        Some(HistoryVerdict::Newcomer) => Protection::Newcomer,
+        None => {
+            if row_protected {
+                Protection::Protected
+            } else {
+                Protection::Unverified
+            }
+        }
+    }
 }
 
 /// Shared cached history verdict per room+sender (24h TTL). Used both to
@@ -736,9 +787,25 @@ async fn resolve_protection(
 /// established actives. Lookup failures and disabled checks yield an empty
 /// (verdict-less) info, which callers treat conservatively.
 async fn history_verdict_cached(state: &AppState, room: &Room, sender: &str) -> HistoryInfo {
+    history_verdict(state, room, sender, true).await
+}
+
+/// Fetch the sender's history verdict. `allow_cache` is false for ban
+/// candidates, where the decision must rest on a fresh answer.
+async fn history_verdict(
+    state: &AppState,
+    room: &Room,
+    sender: &str,
+    allow_cache: bool,
+) -> HistoryInfo {
+    if !state.config.history.enabled {
+        return HistoryInfo::default();
+    }
     let key = format!("{}|{sender}", room.room_id());
-    if let Some(info) = get_cached_history(state, &key).await {
-        return info;
+    if allow_cache {
+        if let Some(info) = get_cached_history(state, &key).await {
+            return info;
+        }
     }
     let mut info = match check_sender_history(room, sender).await {
         Ok(info) => info,
@@ -1303,5 +1370,45 @@ mod tests {
             vec!["$1".to_string()]
         );
         assert!(redact_candidates(&events, "@nobody:x", "$trigger").is_empty());
+    }
+
+    #[test]
+    fn history_outranks_the_stored_newcomer_flag() {
+        // The incident case: DB says verified newcomer, but the sender's own
+        // history already meets the trust bar → protected, never banned.
+        assert_eq!(
+            protection_verdict(false, false, false, true, Some(HistoryVerdict::Established)),
+            Protection::Protected
+        );
+        // Trusted in the DB → protected even with no fresh verdict.
+        assert_eq!(
+            protection_verdict(false, true, false, true, None),
+            Protection::Protected
+        );
+        // Baseline members are protected outright.
+        assert_eq!(
+            protection_verdict(false, false, true, true, None),
+            Protection::Protected
+        );
+        // Genuine newcomer: thin history → ban eligible.
+        assert_eq!(
+            protection_verdict(false, false, false, true, Some(HistoryVerdict::Newcomer)),
+            Protection::Newcomer
+        );
+        // Ban candidate whose history could not be checked → ask moderators.
+        assert_eq!(
+            protection_verdict(false, false, false, true, None),
+            Protection::Unverified
+        );
+        // Unknown-history sender with an inconclusive check stays protected.
+        assert_eq!(
+            protection_verdict(true, false, false, true, None),
+            Protection::Protected
+        );
+        // Nothing risky → no ban path at all.
+        assert_eq!(
+            protection_verdict(false, false, false, false, None),
+            Protection::Protected
+        );
     }
 }

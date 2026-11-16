@@ -104,6 +104,15 @@ impl Store {
              );",
         )
         .context("migrating sqlite schema")?;
+        // Trust is a stronger claim than one join observation: anyone who has
+        // earned trust is an established member and must never stay
+        // ban-eligible as a "verified newcomer". Heals rows that were marked
+        // as newcomers at an early join and later crossed the trust bar.
+        c.execute(
+            "UPDATE users SET protected = 1, verified_newcomer = 0 WHERE trusted = 1",
+            [],
+        )
+        .context("healing trust/protection flags")?;
         Ok(())
     }
 
@@ -214,6 +223,12 @@ impl Store {
         u.last_activity_ts = now_ts;
         if !u.trusted && u.activity_count >= min_messages && u.distinct_days >= min_days {
             u.trusted = true;
+            // Earning trust promotes the sender to established. Without this,
+            // a join observed before they had any history leaves
+            // verified_newcomer=true forever, and the ban path keeps treating
+            // a 50-message veteran as a ban-eligible newcomer.
+            u.protected = true;
+            u.verified_newcomer = false;
         }
         self.upsert(&u)?;
         Ok(u)
@@ -234,6 +249,10 @@ impl Store {
         u.distinct_days = u.distinct_days.max(distinct_days);
         u.last_activity_ts = now_ts;
         u.trusted = true;
+        // Fast-tracked history means established, not newcomer: restore
+        // protection so a report cannot permaban a proven member.
+        u.protected = true;
+        u.verified_newcomer = false;
         self.upsert(&u)?;
         Ok(u)
     }
@@ -381,6 +400,61 @@ mod tests {
             .needs_scan("@u:example.org", day1 + 100 * 86_400, 90)
             .unwrap());
         assert!(s.get_user("@u:example.org").unwrap().protected);
+    }
+
+    #[test]
+    fn earning_trust_promotes_newcomer_to_protected() {
+        let (_d, s) = tmp_store();
+        // A join observed early marks them a ban-eligible newcomer...
+        let u = s.mark_membership("@n:example.org", true, false).unwrap();
+        assert!(!u.protected);
+        assert!(u.verified_newcomer);
+        // ...but crossing the trust bar must restore protection.
+        let day1 = 1_700_000_000i64;
+        for d in 0..3 {
+            for _ in 0..4 {
+                s.record_legit_activity("@n:example.org", day1 + d * 86_400, 10, 3)
+                    .unwrap();
+            }
+        }
+        let u = s.get_user("@n:example.org").unwrap();
+        assert!(u.trusted);
+        assert!(u.protected);
+        assert!(!u.verified_newcomer);
+    }
+
+    #[test]
+    fn fast_tracked_trust_restores_protection() {
+        let (_d, s) = tmp_store();
+        let u = s.mark_membership("@v:example.org", true, false).unwrap();
+        assert!(!u.protected);
+        let u = s
+            .mark_trusted_from_history("@v:example.org", 42, 5, 1_700_000_000)
+            .unwrap();
+        assert!(u.trusted);
+        assert!(u.protected);
+        assert!(!u.verified_newcomer);
+    }
+
+    #[test]
+    fn migration_heals_trusted_but_unprotected_rows() {
+        let (d, s) = tmp_store();
+        s.mark_membership("@old:example.org", true, false).unwrap();
+        let path = d.path().join("t.db").to_string_lossy().to_string();
+        {
+            let c = rusqlite::Connection::open(&path).unwrap();
+            c.execute(
+                "UPDATE users SET trusted = 1 WHERE user_id = '@old:example.org'",
+                [],
+            )
+            .unwrap();
+        }
+        // Re-open runs the heal; a trusted veteran must come back protected.
+        let s2 = Store::open(&path).unwrap();
+        let u = s2.get_user("@old:example.org").unwrap();
+        assert!(u.trusted);
+        assert!(u.protected);
+        assert!(!u.verified_newcomer);
     }
 
     #[test]

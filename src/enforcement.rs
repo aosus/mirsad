@@ -21,6 +21,20 @@ pub enum Action {
     NotifyMods,
 }
 
+/// Ban-eligibility for a spam/language offender.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Protection {
+    /// Trusted, baseline, or history that already meets the trust bar.
+    /// Never auto-banned.
+    Protected,
+    /// Verified newcomer whose own room history is below the trust bar.
+    /// Ban is allowed on a clear violation.
+    Newcomer,
+    /// History could not be verified (lookup failed, disabled, or empty
+    /// response). Never ban: flag for a moderator to decide instead.
+    Unverified,
+}
+
 impl Action {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -48,7 +62,9 @@ pub struct EnforcementInput<'a> {
     /// "warn" | "delete" | "ignore"
     pub language_action: &'a str,
     /// Verified newcomer (not protected) vs established/unknown (protected).
-    pub protected: bool,
+    /// `Unverified` means a ban candidate whose history could not be checked:
+    /// always route that to moderators instead of banning.
+    pub protection: Protection,
     /// Admins / excluded users: never punished.
     pub excluded: bool,
     /// Observation mode: never redact/ban.
@@ -94,35 +110,50 @@ pub fn decide(inp: EnforcementInput<'_>) -> EnforcementDecision {
                 language_hit,
             };
         }
-        if !inp.protected {
-            return EnforcementDecision {
-                action: Action::DeleteBan,
-                explanation: format!(
-                    "Clear spam from a verified newcomer (spam {:.1}% ≥ {:.0}%); deleting all recent messages and banning.",
-                    inp.cls.spam_score * 100.0,
-                    inp.spam_threshold * 100.0
-                ),
-                spam_hit,
-                language_hit,
-            };
-        }
-        // Protected member: compromised account or model mistake — never auto-ban.
-        if inp.prior_warns >= 2 {
-            return EnforcementDecision {
-                action: Action::NotifyMods,
-                explanation: format!(
-                    "Protected member with {} prior warnings posted spam-like content ({:.1}%); deleting and escalating to moderators instead of banning.",
-                    inp.prior_warns,
-                    inp.cls.spam_score * 100.0
-                ),
-                spam_hit,
-                language_hit,
+        if inp.protection != Protection::Newcomer {
+            return match inp.protection {
+                Protection::Protected => {
+                    if inp.prior_warns >= 2 {
+                        EnforcementDecision {
+                            action: Action::NotifyMods,
+                            explanation: format!(
+                                "Protected member with {} prior warnings posted spam-like content ({:.1}%); deleting and escalating to moderators instead of banning.",
+                                inp.prior_warns,
+                                inp.cls.spam_score * 100.0
+                            ),
+                            spam_hit,
+                            language_hit,
+                        }
+                    } else {
+                        EnforcementDecision {
+                            action: Action::DeleteWarn,
+                            explanation: format!(
+                                "Protected member posted spam-like content (spam {:.1}% ≥ {:.0}%); deleting and warning, no ban.",
+                                inp.cls.spam_score * 100.0,
+                                inp.spam_threshold * 100.0
+                            ),
+                            spam_hit,
+                            language_hit,
+                        }
+                    }
+                }
+                Protection::Unverified => EnforcementDecision {
+                    action: Action::NotifyMods,
+                    explanation: format!(
+                        "Sender history could not be verified (spam {:.1}% ≥ {:.0}%); holding for moderator review instead of banning.",
+                        inp.cls.spam_score * 100.0,
+                        inp.spam_threshold * 100.0
+                    ),
+                    spam_hit,
+                    language_hit,
+                },
+                Protection::Newcomer => unreachable!("handled above"),
             };
         }
         return EnforcementDecision {
-            action: Action::DeleteWarn,
+            action: Action::DeleteBan,
             explanation: format!(
-                "Protected member posted spam-like content (spam {:.1}% ≥ {:.0}%); deleting and warning, no ban.",
+                "Clear spam from a verified newcomer whose own history is below the trust bar (spam {:.1}% ≥ {:.0}%); deleting all recent messages and banning.",
                 inp.cls.spam_score * 100.0,
                 inp.spam_threshold * 100.0
             ),
@@ -175,22 +206,35 @@ pub fn decide(inp: EnforcementInput<'_>) -> EnforcementDecision {
                         language_hit,
                     };
                 }
-                if !inp.protected {
-                    return EnforcementDecision {
-                        action: Action::DeleteBan,
-                        explanation: format!(
-                            "Newcomer posted a non-Arabic message (language {:.1}% ≥ {:.0}%) in an Arabic-only group; deleting and banning.",
-                            inp.cls.language_score * 100.0,
-                            inp.language_threshold * 100.0
-                        ),
-                        spam_hit,
-                        language_hit,
+                if inp.protection != Protection::Newcomer {
+                    return match inp.protection {
+                        Protection::Protected => EnforcementDecision {
+                            action: Action::DeleteWarn,
+                            explanation: format!(
+                                "Language-policy violation ({:.1}% ≥ {:.0}%); deleting and warning (not treated as financial scam).",
+                                inp.cls.language_score * 100.0,
+                                inp.language_threshold * 100.0
+                            ),
+                            spam_hit,
+                            language_hit,
+                        },
+                        Protection::Unverified => EnforcementDecision {
+                            action: Action::NotifyMods,
+                            explanation: format!(
+                                "Language violation ({:.1}% ≥ {:.0}%) but sender history could not be verified; holding for moderator review instead of banning.",
+                                inp.cls.language_score * 100.0,
+                                inp.language_threshold * 100.0
+                            ),
+                            spam_hit,
+                            language_hit,
+                        },
+                        Protection::Newcomer => unreachable!("handled above"),
                     };
                 }
                 return EnforcementDecision {
-                    action: Action::DeleteWarn,
+                    action: Action::DeleteBan,
                     explanation: format!(
-                        "Language-policy violation ({:.1}% ≥ {:.0}%); deleting and warning (not treated as financial scam).",
+                        "Newcomer posted a non-Arabic message (language {:.1}% ≥ {:.0}%) in an Arabic-only group; deleting and banning.",
                         inp.cls.language_score * 100.0,
                         inp.language_threshold * 100.0
                     ),
@@ -237,7 +281,7 @@ mod tests {
             spam_threshold: 0.9,
             language_threshold: 0.9,
             language_action: "warn",
-            protected: false,
+            protection: Protection::Newcomer,
             excluded: false,
             dry_run: false,
             prior_warns: 0,
@@ -262,15 +306,26 @@ mod tests {
     fn protected_member_never_banned() {
         let c = cls(0.99, 0.1);
         let mut i = base(&c);
-        i.protected = true;
+        i.protection = Protection::Protected;
         assert_eq!(decide(i).action, Action::DeleteWarn);
+    }
+
+    #[test]
+    fn unverified_history_never_bans() {
+        let c = cls(0.99, 0.1);
+        let mut i = base(&c);
+        i.protection = Protection::Unverified;
+        let d = decide(i);
+        assert_eq!(d.action, Action::NotifyMods);
+        assert!(d.explanation.contains("could not be verified"));
+        assert!(d.explanation.contains("moderator review"));
     }
 
     #[test]
     fn protected_repeat_offender_escalates_without_ban() {
         let c = cls(0.99, 0.1);
         let mut i = base(&c);
-        i.protected = true;
+        i.protection = Protection::Protected;
         i.prior_warns = 3;
         assert_eq!(decide(i).action, Action::NotifyMods);
     }
@@ -294,8 +349,7 @@ mod tests {
     #[test]
     fn newcomer_language_violation_banned_outright() {
         let c = cls(0.1, 0.95);
-        let mut i = base(&c);
-        i.protected = false;
+        let i = base(&c);
         assert_eq!(decide(i).action, Action::DeleteBan);
     }
 
@@ -303,9 +357,17 @@ mod tests {
     fn protected_language_violation_only_warned() {
         let c = cls(0.1, 0.95);
         let mut i = base(&c);
-        i.protected = true;
+        i.protection = Protection::Protected;
         let d = decide(i);
         assert_ne!(d.action, Action::DeleteBan);
         assert_eq!(d.action, Action::DeleteWarn);
+    }
+
+    #[test]
+    fn unverified_language_violation_asks_moderators() {
+        let c = cls(0.1, 0.95);
+        let mut i = base(&c);
+        i.protection = Protection::Unverified;
+        assert_eq!(decide(i).action, Action::NotifyMods);
     }
 }
