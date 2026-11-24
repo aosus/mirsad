@@ -3,3 +3,5 @@ mirsad.db*
 *.db-journal
 matrix-store/
 .env
+benchmark.sqlite3*
+*.jsonl

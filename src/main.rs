@@ -6,7 +6,9 @@
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand, ValueEnum};
+use matrix_sdk::ruma::{OwnedEventId, OwnedRoomId};
+use mirsad::benchmark::Benchmark;
 use mirsad::{config::Secrets, decider::DeciderClient, matrix, policy, store::Store};
 use tokio::sync::Mutex;
 
@@ -19,6 +21,32 @@ struct Cli {
     /// Validate configs and exit (no network needed, skips API key check)
     #[arg(long, default_value_t = false)]
     check_config: bool,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Export sensitive benchmark records to a new private JSONL file.
+    BenchmarkExport { output: PathBuf },
+    /// Append an explicit event-level judgment as a trusted local operator.
+    BenchmarkFeedback {
+        #[arg(long)]
+        room: OwnedRoomId,
+        #[arg(long)]
+        event: OwnedEventId,
+        #[arg(long)]
+        label: Label,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Label {
+    Spam,
+    NotSpam,
+    FalsePositive,
+    FalseNegative,
 }
 
 #[tokio::main]
@@ -33,6 +61,22 @@ async fn main() -> Result<()> {
 
     let cfg = mirsad::config::AppConfig::load(&cli.config)
         .with_context(|| format!("loading {}", cli.config.display()))?;
+    let benchmark_dir = cfg.benchmark.directory.as_deref().map(std::path::Path::new);
+    if let Some(command) = cli.command {
+        let directory = benchmark_dir.context("benchmark.directory is not configured")?;
+        let benchmark = Benchmark::open(directory, false)?;
+        return match command {
+            Command::BenchmarkExport { output } => benchmark.export(&output),
+            Command::BenchmarkFeedback { room, event, label } => {
+                anyhow::ensure!(
+                    cfg.benchmark.captures(room.as_str()),
+                    "room not opted into benchmark"
+                );
+                benchmark.record("moderator_feedback", room.as_str(), None,
+                    serde_json::json!({"target_event_id": event, "label": label, "source": "local_operator"}))
+            }
+        };
+    }
     let policy = policy::PolicyFile::load(std::path::Path::new(&cfg.policy.questions_file))
         .context("loading decision-questions file")?;
     // Every *configured* question id must exist in the policy file.
@@ -91,7 +135,15 @@ async fn main() -> Result<()> {
         cfg.decider.timeout_secs,
     )?;
     let store = Store::open(&cfg.storage.sqlite_path)?;
+    let benchmark = benchmark_dir.and_then(|path| match Benchmark::open(path, true) {
+        Ok(benchmark) => Some(benchmark),
+        Err(error) => {
+            tracing::error!("benchmark capture unavailable: {error:#}");
+            None
+        }
+    });
     let state = Arc::new(matrix::AppState {
+        benchmark,
         config: cfg.clone(),
         questions: policy.as_api_value(),
         spam_q: cfg.policy.spam_question.clone().unwrap_or_default(),

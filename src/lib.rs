@@ -10,3 +10,5 @@ pub mod policy;
 pub mod report;
 pub mod rose;
 pub mod store;
+
+pub mod benchmark;

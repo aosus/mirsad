@@ -64,6 +64,7 @@ pub struct PowerEntry {
 }
 
 pub struct AppState {
+    pub benchmark: Option<crate::benchmark::Benchmark>,
     pub config: AppConfig,
     pub questions: serde_json::Value,
     pub spam_q: String,
@@ -83,6 +84,20 @@ pub struct AppState {
 }
 
 impl AppState {
+    fn benchmark_for(&self, room: &str) -> Option<&crate::benchmark::Benchmark> {
+        self.benchmark
+            .as_ref()
+            .filter(|_| self.config.benchmark.captures(room))
+    }
+
+    fn record_signal(&self, kind: &str, room: &str, id: &str, data: serde_json::Value) {
+        if let Some(benchmark) = self.benchmark_for(room) {
+            if benchmark.record(kind, room, Some(id), data).is_err() {
+                warn!("benchmark write failed ({kind})");
+            }
+        }
+    }
+
     pub fn trust_labels(&self, user_id: &str) -> (String, String) {
         let row = self.store.get_user(user_id).unwrap_or_default();
         // Need a UserRow default — construct labels defensively.
@@ -321,7 +336,18 @@ async fn handle_invite(ev: StrippedRoomMemberEvent, client: Client, room: Room) 
     );
 }
 
-async fn handle_member(ev: OriginalSyncRoomMemberEvent, _room: Room, ctx: Ctx<Arc<AppState>>) {
+async fn handle_member(
+    ev: OriginalSyncRoomMemberEvent,
+    room: Room,
+    client: Client,
+    ctx: Ctx<Arc<AppState>>,
+) {
+    if let Some(own_id) = client
+        .user_id()
+        .filter(|_| room.state() == RoomState::Joined && ctx.live.load(Ordering::SeqCst))
+    {
+        observe_external_ban(&ctx, room.room_id().as_str(), own_id.as_str(), &ev);
+    }
     // A live join observed after startup marks the user a verified newcomer —
     // but only if they have no recorded activity and are not baseline.
     // (Handlers attach after the initial sync, so backfill never reaches here.)
@@ -337,6 +363,30 @@ async fn handle_member(ev: OriginalSyncRoomMemberEvent, _room: Room, ctx: Ctx<Ar
                 let _ = ctx.store.mark_membership(&uid, true, false);
             }
         }
+    }
+}
+
+fn observe_external_ban(
+    state: &AppState,
+    room: &str,
+    own_id: &str,
+    ev: &OriginalSyncRoomMemberEvent,
+) {
+    // Other actors' bans are user-level signals, not judgments of a message.
+    if ev.content.membership == MembershipState::Ban
+        && ev.sender.as_str() != own_id
+        && ev
+            .prev_content()
+            .is_none_or(|c| c.membership != MembershipState::Ban)
+        && state.benchmark_for(room).is_some()
+    {
+        state.record_signal(
+            "external_ban",
+            room,
+            ev.event_id.as_str(),
+            serde_json::json!({"membership_event_id": ev.event_id, "actor": ev.sender,
+                "subject_user_id": ev.state_key, "origin_server_ts": ev.origin_server_ts}),
+        );
     }
 }
 
@@ -432,7 +482,17 @@ async fn on_message(
         None => None,
     };
 
-    match classify_message(&state, &body, &sender, &room_id, image.as_ref()).await {
+    match classify_message(
+        &state,
+        &body,
+        &sender,
+        &room_id,
+        image.as_ref(),
+        ev.event_id.as_str(),
+        None,
+    )
+    .await
+    {
         Ok(cls) => {
             let row = state
                 .store
@@ -588,6 +648,15 @@ async fn handle_report(
     // FRESH classification, ignoring trust/cache. Photo reports include the
     // image itself, not just the filename.
     let room_id = room.room_id().to_string();
+    if state.benchmark_for(&room_id).is_some() {
+        state.record_signal(
+            "manual_report",
+            &room_id,
+            ev.event_id.as_str(),
+            serde_json::json!({"report_event_id": ev.event_id, "target_event_id": target_id,
+                "reporter": reporter, "origin_server_ts": ev.origin_server_ts}),
+        );
+    }
     let image = match reported.image {
         Some((mxc, ref filename)) if state.config.decider.images_enabled => {
             let uri: OwnedMxcUri = mxc.as_str().into();
@@ -607,6 +676,8 @@ async fn handle_report(
         &target_author,
         &room_id,
         image.as_ref(),
+        &target_id,
+        Some(ev.event_id.as_str()),
     )
     .await
     {
@@ -935,6 +1006,8 @@ async fn classify_message(
     author: &str,
     room_id: &str,
     image: Option<&ImageAttachment>,
+    event_id: &str,
+    report_event_id: Option<&str>,
 ) -> Result<Classification> {
     let st = match image {
         Some(img) => {
@@ -942,10 +1015,36 @@ async fn classify_message(
         }
         None => message_state(body, author, room_id, state.config.decider.max_chars),
     };
-    let resp = state
-        .decider
-        .classify(st.clone(), state.questions.clone())
-        .await?;
+    let benchmark = state.benchmark_for(room_id);
+    // Select only the text object, never the inline media part.
+    let input = benchmark.map(|_| st.get(0).unwrap_or(&st).clone());
+    let response = state.decider.classify(st, state.questions.clone()).await;
+    if let Some(benchmark) = benchmark {
+        let outcome = match &response {
+            Ok(resp) => {
+                serde_json::json!({"status": "ok", "model": resp.model, "answers": resp.answers})
+            }
+            Err(_) => serde_json::json!({"status": "classifier_error"}),
+        };
+        if benchmark
+            .record(
+                "analysis",
+                room_id,
+                None,
+                serde_json::json!({
+                    "target_event_id": event_id,
+                    "source": if report_event_id.is_some() { "manual_report" } else { "routine" },
+                    "report_event_id": report_event_id, "text_state": input,
+                    "image_submitted": image.is_some(), "requested_model": state.decider.model(),
+                    "questions": state.questions, "outcome": outcome,
+                }),
+            )
+            .is_err()
+        {
+            warn!("benchmark write failed (analysis)");
+        }
+    }
+    let resp = response?;
     let raw = serde_json::json!({"answers": resp.answers, "model": resp.model});
     Ok(Classification::from_response(
         &resp,
@@ -1335,6 +1434,125 @@ async fn notify_mods(state: &AppState, client: &Client, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn benchmark_captures_classifier_attempts_and_user_level_bans() {
+        use serde_json::{json, Value};
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let directory = tmp.path().join("benchmark");
+        let room = "!room:example.org";
+        let config = tmp.path().join("config.toml");
+        std::fs::write(
+            &config,
+            format!("[benchmark]\ndirectory = {directory:?}\nrooms = [{room:?}]\n"),
+        )
+        .unwrap();
+        let provider = MockServer::start().await;
+        let mock = Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "answers": {"spam": {"noul": 0.12}}, "model": "resolved-model"
+            })))
+            .expect(2)
+            .mount_as_scoped(&provider)
+            .await;
+        let state = AppState {
+            config: AppConfig::load(&config).unwrap(),
+            benchmark: Some(crate::benchmark::Benchmark::open(&directory, true).unwrap()),
+            questions: json!({"spam": {"type": "noul", "instructions": "spam?"}}),
+            spam_q: "spam".into(),
+            lang_q: String::new(),
+            cat_q: String::new(),
+            decider: DeciderClient::new(
+                provider.uri(),
+                "requested-model".into(),
+                "test-key".into(),
+                "test".into(),
+                None,
+                1,
+            )
+            .unwrap(),
+            store: Store::open(":memory:").unwrap(),
+            reports: Default::default(),
+            history_cache: Default::default(),
+            power_cache: Default::default(),
+            last_sync_ts: Default::default(),
+            live: Default::default(),
+        };
+        let image = ImageAttachment {
+            bytes: vec![1, 2, 3],
+            mime: "image/png".into(),
+        };
+        let result = classify_message(
+            &state,
+            "caption",
+            "@a:example.org",
+            room,
+            Some(&image),
+            "$target",
+            Some("$report"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.spam_score, 0.12);
+        classify_message(
+            &state,
+            "not recorded",
+            "@a:example.org",
+            "!other:example.org",
+            None,
+            "$other",
+            None,
+        )
+        .await
+        .unwrap();
+        drop(mock); // The next request receives an unmatched 404.
+        assert!(
+            classify_message(&state, "test", "@a:example.org", room, None, "$error", None)
+                .await
+                .is_err()
+        );
+
+        let membership: OriginalSyncRoomMemberEvent = serde_json::from_value(json!({
+            "type": "m.room.member", "sender": "@mod:example.org", "event_id": "$ban",
+            "state_key": "@a:example.org", "origin_server_ts": 123,
+            "content": {"membership": "ban"}, "unsigned": {"prev_content": {"membership": "join"}}
+        }))
+        .unwrap();
+        // No row for the bot's own ban or an unlisted room. Replayed ban is deduplicated.
+        observe_external_ban(&state, room, "@mod:example.org", &membership);
+        observe_external_ban(
+            &state,
+            "!other:example.org",
+            "@bot:example.org",
+            &membership,
+        );
+        observe_external_ban(&state, room, "@bot:example.org", &membership);
+        observe_external_ban(&state, room, "@bot:example.org", &membership);
+
+        let export = tmp.path().join("export.jsonl");
+        state.benchmark.unwrap().export(&export).unwrap();
+        let text = std::fs::read_to_string(export).unwrap();
+        assert!(!text.contains("AQID"));
+        assert!(!text.contains("data:image"));
+        let rows: Vec<Value> = text
+            .lines()
+            .map(|row| serde_json::from_str(row).unwrap())
+            .collect();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0]["data"]["text_state"]["message"], "caption");
+        assert_eq!(rows[0]["data"]["image_submitted"], true);
+        assert_eq!(rows[0]["data"]["report_event_id"], "$report");
+        assert_eq!(rows[0]["data"]["outcome"]["model"], "resolved-model");
+        assert_eq!(rows[2]["kind"], "external_ban");
+        assert_eq!(rows[2]["data"]["subject_user_id"], "@a:example.org");
+        assert!(rows[2]["data"].get("target_event_id").is_none());
+        assert_eq!(
+            rows[1]["data"]["outcome"],
+            json!({"status": "classifier_error"})
+        );
+    }
 
     fn text_content(body: &str, relates_to: Option<serde_json::Value>) -> RoomMessageEventContent {
         let mut v = serde_json::json!({"msgtype": "m.text", "body": body});
