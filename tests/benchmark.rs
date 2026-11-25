@@ -77,6 +77,12 @@ fn private_dataset_round_trips_through_local_commands() {
         "{}",
         String::from_utf8_lossy(&feedback.stderr)
     );
+    let unsafe_output = tmp.path().join("export");
+    assert!(db.export(&unsafe_output).is_err());
+    let rejected = run(&["benchmark-export", unsafe_output.to_str().unwrap()]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("must end in .jsonl"));
+    assert!(!unsafe_output.exists());
     let export = run(&["benchmark-export", output.to_str().unwrap()]);
     assert!(
         export.status.success(),
@@ -104,4 +110,26 @@ fn private_dataset_round_trips_through_local_commands() {
     }
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
     assert!(Benchmark::open(&dir, false).is_err());
+}
+
+#[test]
+fn capture_commits_while_an_export_snapshot_is_active() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("private");
+    let capture = Benchmark::open(&dir, true).unwrap();
+    capture.record("analysis", "room", None, json!({})).unwrap();
+
+    let reader = rusqlite::Connection::open(dir.join("benchmark.sqlite3")).unwrap();
+    let mut query = reader
+        .prepare("SELECT payload FROM records ORDER BY seq")
+        .unwrap();
+    let mut rows = query.query([]).unwrap();
+    assert!(rows.next().unwrap().is_some());
+    // Keep the export query positioned on a row while the other connection commits.
+    capture.record("analysis", "room", None, json!({})).unwrap();
+    assert!(rows.next().unwrap().is_none());
+    let count: i64 = reader
+        .query_row("SELECT count(*) FROM records", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 2);
 }

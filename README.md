@@ -69,7 +69,7 @@ mirsad --config config/config.toml benchmark-feedback \
 mirsad --config config/config.toml benchmark-export ./benchmark.jsonl
 ```
 
-These commands need local database access, not Matrix or model credentials. Restrict database access to the bot service account and trusted moderator operators; Mirsad does not check Matrix permissions for local commands. Export requires a new output path and creates a private file. Labels are `spam`, `not-spam`, `false-positive` (benign), and `false-negative` (spam). An explicit label can reference an event that was never analyzed; no text is fetched for it. Feedback is append-only, so resolve conflicting judgments before scoring.
+These commands need local database access, not Matrix or model credentials. Restrict database access to the bot service account and trusted moderator operators; Mirsad does not check Matrix permissions for local commands. Export requires a new output path ending in `.jsonl` and creates a private file. Git and Docker ignore that suffix by default. SQLite uses WAL so capture can continue during export; keep the database and its `-wal` and `-shm` sidecars together in the private directory. Labels are `spam`, `not-spam`, `false-positive` (benign), and `false-negative` (spam). An explicit label can reference an event that was never analyzed; no text is fetched for it. Feedback is append-only, so resolve conflicting judgments before scoring.
 
 JSONL records carry a `schema_version`, `kind`, `room_id`, `recorded_at`, and `data`:
 

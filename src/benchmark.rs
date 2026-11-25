@@ -27,6 +27,15 @@ impl BenchmarkConfig {
 
 pub struct Benchmark(Mutex<Connection>);
 
+fn validate_export_path(path: &Path) -> Result<()> {
+    // Keep the required suffix aligned with .gitignore and .dockerignore.
+    ensure!(
+        path.extension().is_some_and(|ext| ext == "jsonl"),
+        "benchmark export output must end in .jsonl"
+    );
+    Ok(())
+}
+
 impl Benchmark {
     pub fn open(directory: &Path, create: bool) -> Result<Self> {
         if create && !directory.exists() {
@@ -61,6 +70,12 @@ impl Benchmark {
         );
         let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         conn.busy_timeout(Duration::from_millis(250))?;
+        // A streaming export must not block commits from another connection.
+        let mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+        ensure!(
+            mode.eq_ignore_ascii_case("wal"),
+            "benchmark database requires WAL mode"
+        );
         if create {
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS records (
@@ -93,6 +108,7 @@ impl Benchmark {
     }
 
     pub fn export(&self, path: &Path) -> Result<()> {
+        validate_export_path(path)?;
         let db = self
             .0
             .lock()
