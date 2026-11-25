@@ -28,6 +28,8 @@ pub struct AppConfig {
     pub report: ReportConfig,
     #[serde(default)]
     pub storage: StorageConfig,
+    #[serde(default)]
+    pub benchmark: crate::benchmark::BenchmarkConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -393,6 +395,19 @@ impl AppConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if let Some(directory) = &self.benchmark.directory {
+            anyhow::ensure!(
+                !directory.trim().is_empty() && !self.benchmark.rooms.is_empty(),
+                "benchmark requires a directory and explicit rooms"
+            );
+            for room in &self.benchmark.rooms {
+                anyhow::ensure!(
+                    matrix_sdk::ruma::RoomId::parse(room.as_str()).is_ok()
+                        && self.room_monitored(room),
+                    "benchmark room must be a monitored Matrix room ID: {room}"
+                );
+            }
+        }
         anyhow::ensure!(
             (0.0..=1.0).contains(&self.policy.spam_threshold),
             "policy.spam_threshold must be in [0,1]"
@@ -498,6 +513,7 @@ mod tests {
             rose: RoseConfig::default(),
             report: ReportConfig::default(),
             storage: StorageConfig::default(),
+            benchmark: Default::default(),
         };
         assert!(cfg.room_monitored("!anything:example.org"));
         cfg.matrix.monitored_rooms = vec!["!a:example.org".to_string()];
@@ -517,6 +533,7 @@ mod tests {
             rose: RoseConfig::default(),
             report: ReportConfig::default(),
             storage: StorageConfig::default(),
+            benchmark: Default::default(),
         };
         assert!(cfg.validate().is_ok());
         cfg.policy.spam_threshold = 9.0;

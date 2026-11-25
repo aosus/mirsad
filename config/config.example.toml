@@ -54,6 +54,12 @@ min_days = 3
 inactivity_days = 90
 filler_min_chars = 5
 
+# Optional, sensitive local dataset. Disabled unless a directory and explicit
+# monitored room IDs are configured. The parent directory must already exist.
+# [benchmark]
+# directory = "data/benchmark"
+# rooms = ["!community:aosus.org"]
+
 [exclusions]
 # Users never auto-scanned or auto-punished (admins, bots, bridges).
 # `*` matches any substring, e.g. `@admin:*` or `@bot*:aosus.org`.

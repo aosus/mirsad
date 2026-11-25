@@ -57,6 +57,27 @@ Switch models with one line (`decider.model`), e.g. `perplexity/pplx-decider-fla
 
 Reply to any suspicious message with `/spam` or a mention of the bot. Mirsad re-classifies from scratch and posts a public report: scores, thresholds, category probabilities, trust/protection status, action taken, and why. Repeat reports on the same message never double-punish (rate-limited per reporter, duplicate enforcement suppressed).
 
+## Local benchmark dataset (opt-in)
+
+Add `[benchmark]` with `directory = "data/benchmark"` and `rooms = ["!community:example.org"]` to capture only the listed monitored rooms. The parent directory must already exist and be trusted. Mirsad creates the benchmark directory and SQLite file with private permissions. Leave `directory` unset to disable capture. This feature does not change what Mirsad scans, classifies, or enforces; it works in dry-run mode too.
+
+The dataset contains message text sent to the model and Matrix identifiers. It does not store image bytes, image URLs from attachments, or API error bodies. Keep the database, backups, and exports local and access-restricted. Mirsad does not fetch historical data for the benchmark. There is no automatic expiration: set a retention schedule, disable capture to stop collection, and delete the database and exports when no longer needed. Use a separate directory for a new collection if its room scope changes; changing the allowlist does not purge or filter old records.
+
+```sh
+mirsad --config config/config.toml benchmark-feedback \
+  --room '!community:example.org' --event '$message-id' --label false-positive
+mirsad --config config/config.toml benchmark-export ./benchmark.jsonl
+```
+
+These commands need local database access, not Matrix or model credentials. Restrict database access to the bot service account and trusted moderator operators; Mirsad does not check Matrix permissions for local commands. Export requires a new output path ending in `.jsonl` and creates a private file. Git and Docker ignore that suffix by default. SQLite uses WAL so capture can continue during export; keep the database and its `-wal` and `-shm` sidecars together in the private directory. Labels are `spam`, `not-spam`, `false-positive` (benign), and `false-negative` (spam). An explicit label can reference an event that was never analyzed; no text is fetched for it. Feedback is append-only, so resolve conflicting judgments before scoring.
+
+JSONL records carry a `schema_version`, `kind`, `room_id`, `recorded_at`, and `data`:
+
+- `analysis`: one completed classifier attempt, with target event, text state, image-submitted flag, model, questions, and answers or failure status. Group by room and target event to compare models; image-assisted samples cannot be replayed from JSONL alone.
+- `manual_report`: one accepted report, deduplicated by report event ID. Distinct reports of the same target are separate observations; join a report-triggered analysis by `report_event_id`. Reports are not labels.
+- `external_ban`: a ban membership event sent by an actor other than Mirsad (human or other automation). It identifies a user, never a message, and is not a label.
+- `moderator_feedback`: an explicit local human judgment for a target event; this is the only ground-truth source.
+
 ## Deployment checklist (do this before `dry_run = false`)
 
 - [ ] Run 1–2 weeks with `dry_run = true`; review logs + mod-room flags.
